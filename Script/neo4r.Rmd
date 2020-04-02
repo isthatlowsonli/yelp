@@ -35,3 +35,91 @@ library(spatialreg)
 library(igraph)
 library(ade4)
 ```
+
+# Install latest version of neo4r 
+
+*Dev version from GitHub
+```{r}
+remotes::install_github("neo4j-rstats/neo4r")
+```
+# Connection 
+
+* Create connection 
+```{r echo=TRUE}
+library(neo4r)
+con <- neo4j_api$new(
+  url = "http://b87c6e11.ap.ngrok.io",
+  user = "neo4j", 
+  password = "neo4j"
+  )
+```
+
+* Check connection 
+
+```{r}
+con$ping()
+```
+```{r}
+con$get_version()
+```
+```{r}
+con$get_constraints()
+```
+```{r}
+con$get_labels()
+```
+```{r}
+con$get_relationships()
+```
+
+```{r}
+con$get_index()
+```
+
+# Retrieve data from the API
+
+* Unnest node 
+```{r}
+res <- 'MATCH (u:User)-[:WROTE]->(r:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGORY]->(c:Category) 
+	WHERE b.state = "AZ" AND b.is_open = 1 AND b.city ="Phoenix" AND c.id CONTAINS "Restaurant" 
+	WITH u MATCH (u)-[:FRIEND*0..1]-(n) WHERE n.name IS NOT NULL AND n.id <> "None" 
+	RETURN DISTINCT u  LIMIT 10' %>%
+  call_neo4j(con, type = "graph")
+unnest_nodes(res$nodes)
+```
+
+* Unnest graph
+```{r echo=TRUE}
+res <- 'MATCH (u:User)-[:WROTE]->(r:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGORY]->(c:Category) 
+	WHERE b.state = "AZ" AND b.is_open = 1 AND b.city ="Phoenix" AND c.id CONTAINS "Restaurant" 
+	WITH u MATCH (u:User)-[f]-(n:User) WHERE u.name IS NOT NULL AND u.id <> "None" AND n.name IS NOT NULL AND n.id <> "None"
+	RETURN DISTINCT u,Type(f),f,n limit 100' %>%
+  call_neo4j(con, type = "graph") %>%
+  unnest_graph()
+```
+```{r}
+res$nodes
+```
+
+```{r}
+res$relationships
+```
+
+* Extract with `path`
+
+```{r echo=TRUE}
+res <- 'MATCH (u:User)-[:WROTE]->(r:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGORY]->(c:Category) 
+WHERE b.state = "AZ" AND b.is_open = 1 AND b.city ="Phoenix" AND c.id CONTAINS "Restaurant" 
+WITH u 
+MATCH p=(u:User)-[f]-(n:User) 
+WHERE u.name IS NOT NULL AND u.id <> "None" AND n.name IS NOT NULL AND n.id <> "None"
+RETURN DISTINCT p' %>%
+  call_neo4j(con, type = "graph") %>%
+  unnest_graph()
+```
+
+
+
+
+# Reference 
+[Using R & Neo4J](https://neo4j-rstats.github.io/user-guide/)
