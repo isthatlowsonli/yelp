@@ -1,0 +1,37 @@
+---
+title: "neo4r"
+author: "Lowson Li"
+output:
+  html_notebook:
+    code_folding: show
+    highlight: tango
+    number_sections: yes
+    theme: simplex
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    df_print: paged
+    toc: yes
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+# Load packages
+```{r}
+library(tidyverse)
+library(tidygraph)
+library(igraph)
+library(visNetwork)
+library(spdep)
+library(spatialreg)
+library(igraph)
+library(ade4)
+```
