@@ -113,10 +113,35 @@ WHERE b.state = "AZ" AND b.is_open = 1 AND b.city ="Phoenix" AND c.id CONTAINS "
 WITH u 
 MATCH p=(u:User)-[f]-(n:User) 
 WHERE u.name IS NOT NULL AND u.id <> "None" AND n.name IS NOT NULL AND n.id <> "None"
-RETURN DISTINCT p' %>%
+RETURN DISTINCT p LIMIT 10000' %>%
   call_neo4j(con, type = "graph") %>%
   unnest_graph()
 ```
+
+# Convert to igraph 
+
+* Prepare nodes
+```{r}
+res$nodes <-
+  res$nodes %>%
+  select(id, label = value, everything())
+``` 
+
+* Prepare relationships
+```{r}
+res$relationships <- res$relationships %>%
+  select(startNode, endNode, type, everything())
+```
+
+* save network in igraph
+```{r}
+graph_object <- igraph::graph_from_data_frame(
+  d = res$relationships, 
+  directed = FALSE, 
+  vertices = res$nodes
+)
+```
+
 
 
 
