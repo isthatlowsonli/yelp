@@ -38,13 +38,13 @@ library(ade4)
 
 # Install latest version of neo4r 
 
-*Dev version from GitHub
+Dev version from GitHub
 ```{r}
 remotes::install_github("neo4j-rstats/neo4r")
 ```
 # Connection 
 
-* Create connection 
+Create connection 
 ```{r echo=TRUE}
 library(neo4r)
 con <- neo4j_api$new(
@@ -54,8 +54,7 @@ con <- neo4j_api$new(
   )
 ```
 
-* Check connection 
-
+Check connection 
 ```{r}
 con$ping()
 ```
@@ -78,7 +77,7 @@ con$get_index()
 
 # Retrieve data from the API
 
-* Unnest node 
+Unnest node 
 ```{r}
 res <- 'MATCH (u:User)-[:WROTE]->(r:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGORY]->(c:Category) 
 	WHERE b.state = "AZ" AND b.is_open = 1 AND b.city ="Phoenix" AND c.id CONTAINS "Restaurant" 
@@ -88,7 +87,7 @@ res <- 'MATCH (u:User)-[:WROTE]->(r:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGO
 unnest_nodes(res$nodes)
 ```
 
-* Unnest graph
+Unnest graph
 ```{r echo=TRUE}
 res <- 'MATCH (u:User)-[:WROTE]->(r:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGORY]->(c:Category) 
 	WHERE b.state = "AZ" AND b.is_open = 1 AND b.city ="Phoenix" AND c.id CONTAINS "Restaurant" 
@@ -105,7 +104,7 @@ res$nodes
 res$relationships
 ```
 
-* Extract with `path`
+Extract with `path`
 
 ```{r echo=TRUE}
 res <- 'MATCH (u:User)-[:WROTE]->(r:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGORY]->(c:Category) 
@@ -113,28 +112,28 @@ WHERE b.state = "AZ" AND b.is_open = 1 AND b.city ="Phoenix" AND c.id CONTAINS "
 WITH u 
 MATCH p=(u:User)-[f]-(n:User) 
 WHERE u.name IS NOT NULL AND u.id <> "None" AND n.name IS NOT NULL AND n.id <> "None"
-RETURN DISTINCT p LIMIT 10000' %>%
+RETURN DISTINCT p LIMIT 100' %>%
   call_neo4j(con, type = "graph") %>%
   unnest_graph()
 ```
 
 # Convert to igraph 
 
-* Prepare nodes
-```{r}
+Prepare nodes
+```{r echo=TRUE}
 res$nodes <-
   res$nodes %>%
   select(id, label = value, everything())
 ``` 
 
-* Prepare relationships
-```{r}
+Prepare relationships
+```{r echo=TRUE}
 res$relationships <- res$relationships %>%
   select(startNode, endNode, type, everything())
 ```
 
-* save network in igraph
-```{r}
+Save network in igraph
+```{r echo=TRUE}
 graph_object <- igraph::graph_from_data_frame(
   d = res$relationships, 
   directed = FALSE, 
@@ -142,9 +141,182 @@ graph_object <- igraph::graph_from_data_frame(
 )
 ```
 
+# Strategy 
+ 
+Since the path is too large for directed import to `igraph` object via `neo4r`, I decide to export:
+1) node list
+2) relationship list 
 
+from `neo4j` directly. 
+
+After getting these 2 critical information, I can create `igraph` object.
+
+## Export nodes & relationships from neo4j
+
+Cypher - export users nodes 
+
+```{Cypher}
+WITH "MATCH (u:User)-[:WROTE]->(:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGORY]->(c:Category) 
+WHERE b.is_open =1 AND b.state = 'AZ' AND c.id CONTAINS 'Restaurant' AND b.city = 'Phoenix' AND b.is_open = 1
+WITH u
+MATCH (u)-[:FRIEND*0..1]-(f)
+WHERE u.name IS NOT NULL AND u.id <> 'None' AND f.name IS NOT NULL AND f.id <>'None'
+WITH DISTINCT f
+RETURN id(f) as neo_id, f.id as user_id" AS query
+CALL apoc.export.csv.query(query, "node.csv", {})
+YIELD file, source, format, nodes, relationships, properties, time, rows, batchSize, batches, done, data
+RETURN file, source, format, nodes, relationships, properties, time, rows, batchSize, batches, done, data;
+```
+
+Cypher - export relationships 
+
+```{Cypher}
+WITH "MATCH (u:User)-[:WROTE]->(:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGORY]->(c:Category) 
+WHERE b.is_open =1 AND b.state = 'AZ' AND c.id CONTAINS 'Restaurant' AND b.city = 'Phoenix' AND b.is_open = 1
+WITH u
+MATCH p=(u)-[:FRIEND]-(f)
+WHERE u.name IS NOT NULL AND u.id <> 'None' AND f.name IS NOT NULL AND f.id <>'None'
+WITH DISTINCT p
+UNWIND apoc.coll.pairsMin(nodes(p)) as pair
+RETURN id(pair[0]) as from, id(pair[1]) as to" AS query
+CALL apoc.export.csv.query(query, "friendship2.csv", {})
+YIELD file, source, format, nodes, relationships, properties, time, rows, batchSize, batches, done, data
+RETURN file, source, format, nodes, relationships, properties, time, rows, batchSize, batches, done, data;
+```
+
+## Node check 
+
+Import nodes 
+```{r}
+library(readr)
+node <- read_csv("~/neo4j-community-3.5.15/import/node.csv")
+```
+
+Check for distinct node 
+```{r}
+node %>% 
+  distinct(neo_id) %>% 
+  nrow()
+```
+
+
+## Relationship check
+
+Load the distinct path version of relationship
+```{r}
+library(readr)
+friendship2 <- read_csv("~/neo4j-community-3.5.15/import/friendship2.csv")
+```
+
+Count all path
+```{r}
+friendship2 %>%
+  nrow()
+```
+
+
+
+Count distinct start node
+```{r}
+friendship2 %>%
+  distinct(from) %>%
+  nrow()
+```
+
+Count distinct end node
+```{r}
+friendship2 %>%
+  distinct(to) %>%
+  nrow()
+```
+
+Count distinct path
+```{r}
+friendship2 %>%
+  distinct(from, to) %>%
+  nrow()
+```
+
+## Test igraph object
+```{r echo=TRUE}
+graph_object <- igraph::graph_from_data_frame(
+  d = friendship2, 
+  directed = FALSE, 
+  vertices = node
+)
+```
+
+# Network and node descriptives
+## Density
+The proportion of present edges from all possible edges in the network.
+```{r}
+edge_density(graph_object, loops=F)
+```
+
+## Transitivity
+
+* global - ratio of triangles (direction disregarded) to connected triples.
+* local - ratio of triangles to connected triples each vertex is part of.
+
+```{r}
+transitivity(graph_object, type="global")  # net is treated as an undirected network
+
+transitivity(as.undirected(graph_object, mode="collapse")) # same as above
+
+# transitivity(net, type="local")
+
+# triad_census(net) # for directed networks 
+```
+
+## Diameter
+A network diameter is the longest geodesic distance (length of the shortest path between two nodes) in the network. In `igraph`, `diameter()` returns the distance, while `get_diameter()` returns the nodes along the first found path of that distance.
+
+Note that edge weights are used by default, unless set to NA.
+```{r}
+# diameter(graph_object, directed=F, weights=NA)
+# slow, do not run
+```
+
+## Degrees
+The function `degree()` has a mode of `in` for in-degree, `out` for out-degree, and `all` or total for total degree.
+
+Degree distribution 
+```{r}
+deg <- degree(graph_object, mode="all")
+hist(deg, breaks=1:vcount(graph_object)-1, main="Histogram of node degree")
+```
+
+```{r}
+deg.dist <- degree_distribution(graph_object, cumulative=T, mode="all")
+
+plot( x=0:max(deg), y=1-deg.dist, pch=19, cex=1.2, col="orange", 
+
+      xlab="Degree", ylab="Cumulative Frequency")
+```
+
+# Community detection
+## Newman-Girvan
+Community detection based on edge betweenness.
+High-betweenness edges are removed sequentially (recalculating at each step) and the best partitioning of the network is selected.
+```{r}
+ # ceb <- cluster_edge_betweenness(grgraph_object) 
+# slow, do not run 
+```
+
+Community detection based on greedy optimization of modularity
+```{r}
+cfg <- cluster_fast_greedy(graph_object)
+```
+```{r}
+cfg <-
+  simplify(graph_object) %>%
+  cluster_fast_greedy()
+```
 
 
 
 # Reference 
 [Using R & Neo4J](https://neo4j-rstats.github.io/user-guide/)
+[Network and node descriptives](https://kateto.net/netscix2016.html)
+[](https://community.neo4j.com/t/access-nodes-in-path/6764)
+[](https://community.neo4j.com/t/how-to-return-from-to-nodes-from-a-path/6876)
