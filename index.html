@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Neovis.js Simple Example</title>
+        <style type="text/css">
+            html, body {
+                font: 16pt arial;
+            }
+    
+            #viz {
+                width: 900px;
+                height: 700px;
+                border: 1px solid lightgray;
+                font: 22pt arial;
+            }
+        </style>
+        <script src="https://cdn.neo4jlabs.com/neovis.js/v1.4.0/neovis.js"></script>
+    </head>
+    <script>
+        function draw() {
+            var config = {
+                container_id: "viz",
+                server_url: "bolt://localhost:7687",
+                server_user: "neo4j",
+                server_password: "neo4j",
+                labels: {
+                    "User":{
+                        size: "degree",
+                        caption: "name"
+                    }
+                },
+                relationships: {
+                    "FRIEND":{
+                        caption: false
+                    }
+
+                },
+                cluster_labels: { 
+                    "User" : "community_louvain2"},
+                initial_cypher: "WITH [48554,372018] AS comm_list MATCH p=(u:User)--(u2:User) WHERE u.community_louvain2[-1] IN comm_list AND  u2.community_louvain2[-1] IN comm_list RETURN p"
+            }
+
+            viz = new NeoVis.default(config);
+            viz.render();
+        }
+    </script>
+    <body onload="draw()">
+        <div id="viz"></div>
+    </body> 
+</html>
