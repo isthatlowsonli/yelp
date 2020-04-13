@@ -1,5 +1,5 @@
 ---
-title: "neo4r"
+title: "Prepare network and user data"
 author: "Lowson Li"
 output:
   html_notebook:
@@ -27,7 +27,6 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE)
 # Load packages
 ```{r}
 library(tidyverse)
-library(tidygraph)
 library(igraph)
 library(visNetwork)
 library(spdep)
@@ -36,19 +35,19 @@ library(igraph)
 library(ade4)
 ```
 
-# Install latest version of neo4r 
+# Neo4j
 
 Dev version from GitHub
-```{r}
-remotes::install_github("neo4j-rstats/neo4r")
+```{r echo=TRUE}
+# remotes::install_github("neo4j-rstats/neo4r")
 ```
-# Connection 
+## Connection 
 
 Create connection 
 ```{r echo=TRUE}
 library(neo4r)
 con <- neo4j_api$new(
-  url = "http://b87c6e11.ap.ngrok.io",
+  url = "http://localhost:7474",
   user = "neo4j", 
   password = "neo4j"
   )
@@ -75,7 +74,7 @@ con$get_relationships()
 con$get_index()
 ```
 
-# Retrieve data from the API
+## Retrieve data from the API
 
 Unnest node 
 ```{r}
@@ -110,14 +109,14 @@ Extract with `path`
 res <- 'MATCH (u:User)-[:WROTE]->(r:Review)-[:REVIEWS]->(b:Business)-[:IN_CATEGORY]->(c:Category) 
 WHERE b.state = "AZ" AND b.is_open = 1 AND b.city ="Phoenix" AND c.id CONTAINS "Restaurant" 
 WITH u 
-MATCH p=(u:User)-[f]-(n:User) 
+MATCH p=(u:User)-[f]->(n:User) 
 WHERE u.name IS NOT NULL AND u.id <> "None" AND n.name IS NOT NULL AND n.id <> "None"
 RETURN DISTINCT p LIMIT 100' %>%
   call_neo4j(con, type = "graph") %>%
   unnest_graph()
 ```
 
-# Convert to igraph 
+## Convert to igraph 
 
 Prepare nodes
 ```{r echo=TRUE}
@@ -140,16 +139,6 @@ graph_object <- igraph::graph_from_data_frame(
   vertices = res$nodes
 )
 ```
-
-# Strategy 
- 
-Since the path is too large for directed import to `igraph` object via `neo4r`, I decide to export:
-1) node list
-2) relationship list 
-
-from `neo4j` directly. 
-
-After getting these 2 critical information, I can create `igraph` object.
 
 ## Export nodes & relationships from neo4j
 
@@ -184,12 +173,27 @@ YIELD file, source, format, nodes, relationships, properties, time, rows, batchS
 RETURN file, source, format, nodes, relationships, properties, time, rows, batchSize, batches, done, data;
 ```
 
+## Strategy 
+ 
+Since the file is too large for directed import to `igraph` object via `neo4r`, I decide to **export**:
+
+1) node list
+2) relationship list 
+
+After getting these 2 critical information, I can create `igraph` object.
+
+
+from `neo4j` **directly**. 
+
+I will run **community detection algoritm** on `neo4j` first, then save the **node** and **relationship** on the server.
+Then load it from `Dremio`, use the `user_id` to join other nodes attributes.
+
 ## Node check 
 
 Import nodes 
 ```{r}
 library(readr)
-node <- read_csv("~/neo4j-community-3.5.15/import/node.csv")
+node <- read_csv("~/neo4j-community-3.5.15/import/node_lv.csv")
 ```
 
 Check for distinct node 
@@ -205,12 +209,12 @@ node %>%
 Load the distinct path version of relationship
 ```{r}
 library(readr)
-friendship2 <- read_csv("~/neo4j-community-3.5.15/import/friendship2.csv")
+friendship_lv <- read_csv("~/neo4j-community-3.5.15/import/friendship_lv.csv")
 ```
 
 Count all path
 ```{r}
-friendship2 %>%
+friendship_lv %>%
   nrow()
 ```
 
@@ -218,39 +222,53 @@ friendship2 %>%
 
 Count distinct start node
 ```{r}
-friendship2 %>%
+friendship_lv %>%
   distinct(from) %>%
   nrow()
 ```
 
 Count distinct end node
 ```{r}
-friendship2 %>%
+friendship_lv %>%
   distinct(to) %>%
   nrow()
 ```
 
 Count distinct path
 ```{r}
-friendship2 %>%
+friendship_lv%>%
   distinct(from, to) %>%
   nrow()
 ```
 
+Check the duplicated path 
+
 ## Test igraph object
 ```{r echo=TRUE}
 graph_object <- igraph::graph_from_data_frame(
-  d = friendship2, 
+  d = friendship_lv, 
   directed = FALSE, 
   vertices = node
 )
 ```
 
-# Network and node descriptives
+Check if the graph is simple(no multiple vertex between 2 nodes)
+
+
+```{r}
+is_simple(graph_object)
+```
+
+```{r echo=TRUE}
+graph_simp <- simplify(graph_object)
+```
+
+
+# Network descriptives
 ## Density
 The proportion of present edges from all possible edges in the network.
 ```{r}
-edge_density(graph_object, loops=F)
+edge_density(graph_simp, loops=F)
 ```
 
 ## Transitivity
@@ -259,9 +277,9 @@ edge_density(graph_object, loops=F)
 * local - ratio of triangles to connected triples each vertex is part of.
 
 ```{r}
-transitivity(graph_object, type="global")  # net is treated as an undirected network
+transitivity(graph_simp, type="global")  # net is treated as an undirected network
 
-transitivity(as.undirected(graph_object, mode="collapse")) # same as above
+# transitivity(as.undirected(graph_simp, mode="collapse")) # same as above
 
 # transitivity(net, type="local")
 
@@ -282,41 +300,101 @@ The function `degree()` has a mode of `in` for in-degree, `out` for out-degree, 
 
 Degree distribution 
 ```{r}
-deg <- degree(graph_object, mode="all")
-hist(deg, breaks=1:vcount(graph_object)-1, main="Histogram of node degree")
+deg <- degree(graph_simp, mode="all")
+
+deg <- deg %>% 
+  table() %>% 
+  as.data.frame()
+
+deg <- deg %>%
+  mutate(degrees = as.numeric(`.`)) %>%
+  select(-`.`)
+
+ggplot(deg, aes(x = degrees, y = Freq)) +
+  geom_point() +
+  scale_x_continuous("Degree\n(nodes with this amount of connections)",
+                     #breaks = c(1, 3, 10, 30, 100, 300),
+                     trans = "log10") +
+  scale_y_continuous("Frequency\n(how many of them)",
+                     #breaks = c(1, 3, 10, 30, 100, 300, 1000),
+                     trans = "log10") +
+  ggtitle("Degree Distribution (log-log)") +
+  theme_bw()
 ```
 
+
+## Assortativity
 ```{r}
-deg.dist <- degree_distribution(graph_object, cumulative=T, mode="all")
-
-plot( x=0:max(deg), y=1-deg.dist, pch=19, cex=1.2, col="orange", 
-
-      xlab="Degree", ylab="Cumulative Frequency")
+assortativity_degree(graph_simp, directed=F)
 ```
 
-# Community detection
+
+# Community detection (TBC)
 ## Newman-Girvan
 Community detection based on edge betweenness.
 High-betweenness edges are removed sequentially (recalculating at each step) and the best partitioning of the network is selected.
 ```{r}
- # ceb <- cluster_edge_betweenness(grgraph_object) 
+# ceb <- cluster_edge_betweenness(grgraph_object) 
 # slow, do not run 
 ```
 
 Community detection based on greedy optimization of modularity
 ```{r}
-cfg <- cluster_fast_greedy(graph_object)
+# cfg <- cluster_fast_greedy(graph_object)
 ```
 ```{r}
-cfg <-
-  simplify(graph_object) %>%
-  cluster_fast_greedy()
+# cfg <-
+#   simplify(graph_object) %>%
+#   cluster_fast_greedy()
 ```
+
+# Dremio data 
+
+Link id of selected nodes to their atributes.
+```{r}
+dremio_host <- "localhost"
+dremio_port <- "31010"
+dremio_uid <- "Lowson"
+dremio_pwd <- "R08323023"
+
+con <- DBI::dbConnect(odbc::odbc(),
+  driver = "Dremio ODBC Driver 64-bit",
+  uid = dremio_uid,
+  pwd = dremio_pwd,
+  host = dremio_host,
+  port = dremio_port,
+  AuthenticationType = "Basic Authentication", ConnectionType = "Direct"
+)
+
+community_lv_full <- con %>% tbl(sql("SELECT * FROM community_lv_full"))
+```
+
+Note that the file is failed to load, which is similar to the the preview issue of the Dremio.
+
+Laod after download the `csv` file from Dremio
+
+```{r}
+library(readr)
+community_lv_full <- read_csv("../Data/community_lv_full.csv")
+# View(community_lv_full)
+```
+
+Skim data 
+```{r}
+skimr::skim(community_lv_full) %>% knitr::kable()
+```
+
+
+
+
 
 
 
 # Reference 
+
 [Using R & Neo4J](https://neo4j-rstats.github.io/user-guide/)
 [Network and node descriptives](https://kateto.net/netscix2016.html)
 [](https://community.neo4j.com/t/access-nodes-in-path/6764)
 [](https://community.neo4j.com/t/how-to-return-from-to-nodes-from-a-path/6876)
+[](https://igraph.org/r/doc/simplify.html)
+[Using Dremio with R and dplyr on macOS](https://cojamalo.github.io/macOS_Dremio_R/guide.html#download-and-install-dremio-odbc-driver)
