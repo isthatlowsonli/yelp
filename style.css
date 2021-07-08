@@ -1,0 +1,63 @@
+html {
+	font-size: 16px;
+    font-weight: 300;
+    font-family: Helvetica Neue, Calibri, Corbel, Helvetica, Roboto, Droid, sans-serif;
+    background: #fff;
+    text-rendering: optimizeLegibility;
+    -webkit-text-size-adjust: 100%;
+    -moz-text-size-adjust: 100%;
+    -ms-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
+body {
+    font-size: 1rem;
+    line-height: 1.5rem;
+    color: #333;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: auto;
+}
+
+h1.title {
+    font-family: Georgia, Times New Roman, serif;
+    font-weight: 500;
+    font-size: 3.25rem;
+    line-height: 3.75rem;
+}
+
+h1 {
+    font-family: Georgia, Times New Roman, serif;
+    font-weight: 500;
+    font-size: 2.25rem;
+    line-height: 3.25rem;
+}
+
+h2 {
+    font-family: Georgia, Times New Roman, serif;
+    font-weight: 500;
+    font-size: 1.75rem;
+    line-height: 2rem;
+}
+
+h3 {
+    font-size: .875rem;
+    line-height: 1.25rem;
+}
+
+p {
+    font-size: 1.25rem;
+    line-height: 2rem;
+}
+
+strong {
+    font-weight: 500;
+}
+
+code {
+	font-family: FiraCode, monospace; 
+	font-size: 1rem;
+}
+
+

@@ -1,0 +1,363 @@
+---
+title: "Category similarity of Yelp restaurants"
+author: "Lowson Li, R08323023"
+output:
+  html_notebook:
+    code_folding: show
+    highlight: tango
+    number_sections: yes
+    theme: simplex
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    df_print: paged
+    toc: yes
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+# Load packages
+```{r}
+library(tidyverse)
+library(knitr)
+library(readr)
+library(skimr)
+library(lubridate)
+library(stargazer)
+library(ggthemes)
+library(textmineR)
+library(tidytext)
+library(ldatuning)
+library(magrittr)
+library(sentimentr)
+```
+
+# LDA
+```{r}
+# prepare data
+business_cat <-
+  explore_bru %>%
+  select(business_id, categories) %>%
+  distinct(business_id, .keep_all = TRUE)
+```
+
+```{r}
+# split in categories in to words
+by_business_word <-
+  business_cat %>%
+  tidytext::unnest_tokens(word, categories)
+
+# find document-word counts
+word_counts <-
+  by_business_word %>%
+  anti_join(stop_words) %>%
+  count(business_id, word, sort = TRUE) %>%
+  ungroup()
+
+word_counts %>% head(10)
+```
+
+# Clustering results by LDA
+```{r}
+# DocumentTermMatrix
+business_dtm <-
+  word_counts %>%
+  tidytext::cast_dtm(business_id, word, n)
+
+business_dtm
+```
+
+```{r}
+# Select number of topics for LDA model
+# devtools::install_github("nikita-moor/ldatuning")
+library(ldatuning)
+result <- FindTopicsNumber(
+  business_dtm,
+  topics = seq(from = 2, to = 15, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+```
+
+```{r}
+FindTopicsNumber_plot(result)
+```
+
+```{r}
+# LDA
+business_lda <- topicmodels::LDA(business_dtm, k = 7, control = list(seed = 1234))
+business_lda 
+```
+
+```{r}
+# per-topic-per-word probabilities
+
+business_topics <- tidy(business_lda, matrix = "beta")
+business_topics %>% head(20)
+```
+
+```{r}
+# top 5 terms within each topic
+top_terms <- business_topics %>%
+  group_by(topic) %>%
+  top_n(5, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+top_terms
+```
+
+```{r}
+business_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+```
+
+
+```{r}
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+
+```{r}
+# Per-document classification
+# per-document-per-topic probabilities, gamma
+business_gamma <- tidy(business_lda, matrix = "gamma")
+business_gamma
+
+```
+
+```{r}
+# classification
+business_classifications <- business_gamma %>%
+  group_by(document) %>%
+  dplyr::slice_max(gamma)%>%
+  ungroup()
+
+business_classifications
+```
+
+
+```{r}
+business_classifications %>% 
+  ungroup() %>%  
+  group_by(topic) %>% 
+  summarise(count = n())
+```
+```{r}
+# join back to the explore_bru
+explore_bru_topic <-
+  business_classifications %>%
+  select(business_id = document, topic) %>%
+  right_join(explore_bru, by = "business_id") 
+
+explore_bru_topic <-
+  explore_bru_topic %>%
+  mutate(topic = as.character(topic))
+```
+
+# Visulizing topic with PCA
+```{r}
+business_gamma %>% 
+  select(business_id = document,everything()) %>%
+  mutate(topic = paste0("topic_",topic)) %>%
+  tidyr::pivot_wider(names_from = topic, values_from = gamma, values_fill = 0) 
+```
+
+
+
+```{r}
+# PCA
+data_pca <-
+  business_gamma %>%
+  ungroup() %>%
+  select(business_id = document, everything()) %>%
+  mutate(topic = paste0("topic_", topic)) %>%
+  tidyr::pivot_wider(names_from = topic, values_from = gamma, values_fill = 0)
+
+res_pca <-
+  prcomp(data_pca[-1], scale = TRUE)
+
+
+library(factoextra)
+fviz_eig(res_pca)
+```
+
+```{r}
+fviz_pca_ind(res_pca,
+  col.ind = "cos2", # Color by the quality of representation
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  geom = "point",
+  repel = TRUE # Avoid text overlapping
+)
+```
+```{r}
+fviz_pca_var(res_pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+```
+```{r}
+fviz_pca_biplot(res_pca, repel = TRUE,
+                geom.ind = "point",
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+                )
+```
+# Sentiment of reviews
+```{r}
+# Full JSON IO stream from URL to file connection.
+# Calculate delays for flights over 1000 miles in batches of 5k
+library(dplyr)
+con_in <- file("/home/Lowson/yelp_project/Data/bru_text.json")
+con_out <- file(tmp <- tempfile(), open = "wb")
+stream_in(con_in, handler = function(df) {
+  df <- dplyr::mutate(df, text = stringr::str_replace(string = text, pattern = "\\\n", replacement = ""))
+  stream_out(df, con_out, pagesize = 1000)
+}, pagesize = 5000)
+close(con_out)
+
+# stream it back in
+bru_text <- stream_in(file(tmp))
+nrow(bru_text)
+unlink(tmp)
+```
+
+
+```{r}
+bru_text <- 
+  bru_text %>% 
+  mutate(text = str_replace_all(text,"\\\n",""))
+
+# bru_text <- 
+#   bru_text %>% 
+#   mutate(text = str_replace_all(text,"\\\\",""))
+```
+
+
+```{r}
+bru_text %>% 
+  mutate(char_count = nchar(text), document_unit = ceiling(char_count/1000)) %>% 
+  summarise(total_unit = sum(document_unit))
+``` 
+```{r}
+420496/1000
+```
+
+Estimated cost 420 USD for sentiment analysis by Google NLP.
+
+```{r}
+# Use sentimemtr
+library(sentimentr)
+library(magrittr)
+bru_text %>% 
+  head(10) %>% 
+  mutate(sentence = sentimentr::get_sentences(text)) %$%
+  sentiment_by(sentence, list(review_id))
+```
+
+
+```{r}
+# verify the result 
+bru_text %>% 
+  filter(review_id == "1s45p14oMTa9F1qEFmQycA") %>% 
+  select(text) %>% 
+  print(text)
+```
+```{r}
+# plot the result
+bru_text %>% 
+  head(10) %>% 
+  mutate(sentence = sentimentr::get_sentences(text)) %$%
+  sentiment_by(sentence, list(review_id)) %>% 
+  plot()
+```
+
+```{r}
+# plot at the sentence level
+bru_text %>% 
+  head(10) %>% 
+  mutate(sentence = sentimentr::get_sentences(text)) %$%
+  sentiment_by(sentence, list(review_id)) %>% 
+  uncombine() %>% 
+  plot()
+```
+
+```{r}
+# generate the review sentiment from whole data
+# too slow, don't run
+# bru_text_sentiment <-
+#   bru_text %>%
+#   mutate(sentence = sentimentr::get_sentences(text)) %$%
+#   sentiment_by(sentence, list(review_id))
+
+# Also too slow, don't run
+
+# datalist <- list()
+# for (i in 1:nrow(bru_text)) {
+#   datalist[[i]] <-
+#     bru_text[i, ] %>%
+#     mutate(sentence = sentimentr::get_sentences(text)) %$%
+#     sentiment_by(sentence, list(review_id))
+#   if (i %% 1000 == 0 ) {
+#     print(paste0((i %/% 1000)*1000," reviews has been proccessed."))
+#   }
+# }
+# 
+# bru_text_sentiment <- data.table::rbindlist(datalist)
+```
+
+
+```{r}
+# parallel computation
+library(parallel)
+parallel::detectCores()
+```
+
+```{r}
+ library(foreach)
+library(doParallel)
+
+no_cores <- detectCores() - 1 # leave one core 
+cl <- makeCluster(no_cores,type = "FORK") # make clusters, specify "fork"
+registerDoParallel()  # register a parallel backend
+
+bru_text_sentiment <- foreach(i = 1:100, .packages = c("sentimentr", "dplyr", "magrittr")) %dopar% {
+  bru_text[i, ] %>%
+    mutate(sentence = sentimentr::get_sentences(text)) %$%
+    sentiment_by(sentence, list(review_id))
+}
+
+bru_text_sentiment <- do.call(rbind,bru_text_sentiment)
+
+
+parallel::stopCluster(cl)
+```
+
+
+
+# References
+[Text Mining with R](https://www.tidytextmining.com/index.html)
+[Cuisine Clustering and Map Construction](http://rstudio-pubs-static.s3.amazonaws.com/110446_5ec3e566feb24074b14aa9e6e5741e63.html)
+[Select number of topics for LDA model](https://cran.r-project.org/web/packages/ldatuning/vignettes/topics.html)
+[Principal Component Analysis in R](http://www.sthda.com/english/articles/31-principal-component-methods-in-r-practical-guide/118-principal-component-analysis-in-r-prcomp-vs-princomp/)
+[A guide to parallelism in R](https://privefl.github.io/blog/a-guide-to-parallelism-in-r/)
+[Using the foreach package](https://cran.r-project.org/web/packages/foreach/vignettes/foreach.html)

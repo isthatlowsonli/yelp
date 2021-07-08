@@ -1,0 +1,555 @@
+---
+title: "Lateset selected models"
+author: "Lowson Li"
+date: "`r format(Sys.time(),'%B %d, %Y')`"
+output:
+  html_notebook:
+    code_folding: show
+    highlight: tango
+    number_sections: yes
+    css: style.css
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    css: style.css
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE, message = FALSE, collapse = TRUE, error = FALSE, warning =  FALSE)
+```
+
+```{r include=FALSE}
+# Load packages
+library(tidyverse)
+library(knitr)
+library(readr)
+library(skimr)
+library(lubridate)
+library(stargazer)
+library(ggthemes)
+library(plm)
+```
+
+
+# Naive
+```{r}
+rating_behavior <-
+  explore_bru %>%
+  group_by(business_id, effective_elite) %>%
+  summarise(avg_ratings = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(business_id, effective_elite) %>%
+  mutate(effective_elite = if_else(effective_elite == 1, "Elite", "Normal")) %>%
+  pivot_wider(names_from = effective_elite, values_from = avg_ratings)
+
+
+network_size <-
+  explore_bru %>%
+  group_by(business_id) %>%
+  summarise(log_network_size = log(n_distinct(user_id)))
+
+# check the network size 
+network_size %>%
+  ungroup() %>%
+  summarise(mean = mean(log_network_size, na.rm = TRUE), sd = sd(log_network_size), quantiles= quantile(log_network_size, c(0, 0.25, 0.5, 0.75, 1)), q = c(0, 0.25, 0.5, 0.75, 1))  %>% pivot_wider(names_from = q, values_from = quantiles)
+
+# check the elite density 
+explore_bru %>%
+  group_by(business_id) %>%
+  summarise(elite_density = sum(effective_elite) / n()) %>%
+  ungroup() %>%
+  summarise(mean = mean(elite_density, na.rm = TRUE), sd = sd(elite_density), quantiles = quantile(elite_density, c(0, 0.25, 0.5, 0.75, 1)), q = c(0, 0.25, 0.5, 0.75, 1)) %>%
+  pivot_wider(names_from = q, values_from = quantiles)
+
+# check the elite count 
+explore_bru %>%
+  group_by(business_id) %>%
+  summarise(elite_count = sum(effective_elite)) %>%
+  ungroup() %>%
+  summarise(mean = mean(elite_count, na.rm = TRUE), sd = sd(elite_count), quantiles = quantile(elite_count, c(0, 0.25, 0.5, 0.75, 1)), q = c(0, 0.25, 0.5, 0.75, 1)) %>%
+  pivot_wider(names_from = q, values_from = quantiles)
+  
+
+rating_behavior %>%
+  left_join(y = network_size, by = "business_id") %>%
+  # skimr::skim()
+  mutate(
+    network_scale =
+      case_when(
+        log_network_size < 2.77 ~ "Tiny",
+        (log_network_size >= 2.77 & log_network_size < 3.93) ~ "Small",
+        (log_network_size >= 3.93 & log_network_size < 5.04) ~ "Medium",
+        log_network_size >= 5.03 ~ "Large",
+        TRUE ~ NA_character_
+      )
+  ) %>%
+  ggplot(aes(x = Elite, y = Normal, color = log_network_size)) +
+  geom_point(alpha = 0.1) +
+  geom_abline(intercept = 0, slope = 1, color = "grey") +
+  geom_smooth() +
+  scale_colour_viridis_c() +
+  facet_grid(cols = vars(network_scale)) +
+  labs(color = "Review count (log)", x = "Restaurant's Avg. Rating from Elites", y = "Restaurant's Avg. Rating from Non-Elites") +
+  theme_minimal()
+```
+
+
+
+# WOM
+```{r}
+# network reviews vs. own reviews 
+baseline_rating <-
+  u_nf_ef_full %>%
+  # mutate(across(.cols = c(u.f_elite, u.f_normal, u.avg_rof_elite, u.avg_rof_normal), .fns = ~ if_else(is.na(.), 0, .))) %>%
+  lm(average_stars ~ yelping_since + u.avg_rof_elite + u.avg_rof_normal + u.f_elite + u.f_normal, data = .)
+
+baseline_review <-
+  u_nf_ef_full %>%
+  # mutate(across(.cols = c(u.f_elite, u.f_normal, u.avg_rof_elite, u.avg_rof_normal), .fns = ~ if_else(is.na(.), 0, .))) %>%
+  lm(review_count ~ yelping_since + u.avg_rof_elite + u.avg_rof_normal + u.f_elite + u.f_normal, data = .)
+
+stargazer::stargazer(
+  baseline_rating, baseline_review,
+  type = "latex",
+  title = "Friends' Review Count and Identiy vs. Own Review Count",
+  style = "aer",
+  align = TRUE,
+  dep.var.labels = c("User's rating", "User's review count"),
+  covariate.labels = c(
+    "Yelping years", "Avg. review count of Elite friends", "Avg. review count of normal friends", "Elite friend count", "Normal friend count"
+  ),
+  omit.stat = c("rsq", "ser"),
+  omit.table.layout = "n"
+)
+```
+```{r}
+# WOM with IVs
+# IV1: ownAvgRatings ~ ownIdentity + avgFriendIdentiy | ownIdentity + avgFriendOfFriend
+library(readr)
+iv_ok <- read_csv("iv_ok.csv")
+iv_ok %>% glimpse()
+iv_ok <-
+  iv_ok %>%
+  select(avg_own_rating = Average_stars, everything())
+iv_ok %>% skimr::skim()
+library(ivreg)
+iv1 <- ivreg(avg_own_rating ~ avg_friend_identity + own_identity | own_identity + avgFansOfFriends, data = iv_ok)
+iv1_ols <- lm(avg_own_rating ~ avg_friend_identity + own_identity, data = iv_ok)
+library(sandwich)
+summary(iv1, vcov = sandwich, diagnostics = TRUE)
+
+stargazer(iv1_ols, iv1, type = "text", style = "aer", align = TRUE)
+
+# IV2: ownReviewCounts ~ ownIdentity + avgFriendIdentiy | ownIdentity + avgFriendOfFriend
+library(readr)
+iv2_ok <- read_csv("/home/Lowson/yelp_project/Script/iv2_ok.csv")
+iv2_ok %>% glimpse()
+iv2_ok <-
+  iv2_ok %>%
+  mutate(date = lubridate::date(yelping_since)) %>%
+  mutate(years = ((max(date) - date) %>% as.numeric()) / 365) %>%
+  select(own_review_count_yearly = review_count / years, everything())
+  # mutate(log_own_review_count = log(own_review_count))
+iv2_ok %>% skimr::skim()
+library(ivreg)
+iv2 <- ivreg(own_review_count_yearly ~ avg_friend_identity + own_identity | own_identity + avgFansOfFriends, data = iv2_ok)
+iv2_ols <- lm(own_review_count_yearly ~ avg_friend_identity + own_identity, data = iv2_ok)
+library(sandwich)
+summary(iv2, vcov = sandwich, diagnostics = TRUE)
+
+library(lmtest)
+rob.fit1 <- coeftest(iv1_ols, function(x) vcovHC(x, type = "HC3"))
+rob.fit2 <- coeftest(iv1, function(x) vcovHC(x, type = "HC3"))
+rob.fit3 <- coeftest(iv2_ols, function(x) vcovHC(x, type = "HC3"))
+rob.fit4 <- coeftest(iv2, function(x) vcovHC(x, type = "HC3"))
+summ.fit1 <- summary(iv1, vcov. = function(x) vcovHC(x, type = "HC3"), diagnostics = T)
+summ.fit2 <- summary(iv2, vcov. = function(x) vcovHC(x, type = "HC3"), diagnostics = T)
+
+stargazer(iv1_ols, iv1, iv2_ols, iv2,
+  style = "aer",
+  type = "latex",
+  se = list(rob.fit1[, "Std. Error"], rob.fit2[, "Std. Error"], rob.fit3[, "Std. Error"], rob.fit4[, "Std. Error"]),
+  model.names = FALSE,
+  column.labels = c("OLS", "IV", "OLS", "IV"),
+  # add.lines = list(
+  #   c("IV", "No", "Yes", "No", "Yes")
+  # ),
+  # add.lines = list(
+  #   c(
+  #     rownames(summ.fit1$diagnostics)[1],
+  #     round(summ.fit1$diagnostics[1, "p-value"], 3),
+  #     round(summ.fit2$diagnostics[1, "p-value"], 3)
+  #   ),
+  #   c(
+  #     rownames(summ.fit1$diagnostics)[2],
+  #     round(summ.fit1$diagnostics[2, "p-value"], 3),
+  #     round(summ.fit2$diagnostics[2, "p-value"], 3)
+  #   )
+  # ),
+  dep.var.labels = c("User's avg. rating", " User's yearly review count"),
+  covariate.labels = c(
+    "Avg. friends' identity", "Own identity"
+  ),
+  omit.stat = c("rsq", "adj.rsq", "ser", "f"),
+  notes.append = FALSE,
+  omit.table.layout = "n"
+)
+```
+```{r}
+# distribution of average elite friend fraction
+iv_ok %>% 
+  ungroup() %>%
+  summarise(mean = mean(avg_friend_identity, na.rm = TRUE), sd = sd(avg_friend_identity), quantiles = quantile(avg_friend_identity, c(0, 0.25, 0.5, 0.75, 1)), q = c(0, 0.25, 0.5, 0.75, 1)) %>%
+  pivot_wider(names_from = q, values_from = quantiles)
+```
+
+
+# Broadcasting
+```{r}
+rob_se_b <- list(
+  sqrt(diag(vcovHC(broadcasting1))),
+  sqrt(diag(vcovHC(broadcasting2)))
+)
+
+
+stargazer::stargazer(
+  broadcasting1, broadcasting2,
+  se = rob_se_b,
+  type = "latex",
+  title = "Broadcsting",
+  style = "aer",
+  align = TRUE,
+  column.labels = c("User (sampled)", "Loner (sampled)"),
+  dep.var.labels = c("User's avg. rating to restaurants"),
+  covariate.labels = c(
+    "Own identity", "Others' avg. identity", "Others' avg. rating", "Price level: \\$\\$", "Price level: \\$\\$\\$",
+    "Price level: \\$\\$\\$\\$", "Noise level: loud", "Noise level: quiet", "Noise level: very loud", "Parking"
+  ), omit.stat = c("rsq", "ser"), notes.append = FALSE,
+  omit.table.layout = "n"
+)
+```
+```{r}
+# check simulated distribution of Elite's fraction in reviews
+resample_100_final_loner %>% 
+  ungroup() %>%
+  summarise(mean = mean(others_avg_identity, na.rm = TRUE), sd = sd(others_avg_identity), quantiles = quantile(others_avg_identity, c(0, 0.25, 0.5, 0.75, 1)), q = c(0, 0.25, 0.5, 0.75, 1)) %>%
+  pivot_wider(names_from = q, values_from = quantiles)
+
+```
+
+
+## User-restaurant level
+
+We can check whether user's current rating or reviews have been affected by the exposure to Elite in the restaurant previously reviewed.
+
+### Prepare data 
+```{r}
+user_by_year <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = lubridate::date(date), year = lubridate::year(date)) %>%
+  group_by(user_id, year) %>%
+  summarise(reviews = n(), real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup()
+
+lag_mean_elite_density <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = lubridate::date(date), year = lubridate::year(date)) %>%
+  group_by(business_id, year) %>%
+  mutate(elite_count = sum(effective_elite),
+         network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  select(business_id, year, elite_density, user_id) %>%
+  ungroup() %>%
+  filter(if_all(.col = everything(), .fns = ~ !is.na(.))) %>%
+  group_by(user_id, year) %>%
+  summarise(mean_elite_density = mean(elite_density, na.rm = TRUE)) %>%
+  ungroup() %>%
+  group_by(user_id) %>%
+  mutate(lag_mean_elite_density = lag(mean_elite_density, order_by = year)) %>%
+  arrange(user_id, year) %>%
+  filter(if_all(.col = everything(), .fns = ~ !is.na(.))) %>% 
+  ungroup()
+
+user_by_year_ok <-
+  user_by_year  %>%
+  left_join(lag_mean_elite_density, by = c("user_id", "year")) %>%
+  filter(if_all(.col = everything(), .fns = ~ !is.na(.))) 
+```
+
+### Ratings
+```{r}
+plm_p_user_ratings_by_year <- plm(real_stars ~ lag_mean_elite_density,
+  data = user_by_year_ok,
+  index = c("user_id", "year"),
+  model = "pooling"
+)
+
+
+plm_fe_user_ratings_by_year <- plm(real_stars ~ lag_mean_elite_density,
+  data = user_by_year_ok,
+  index = c("user_id", "year"),
+  model = "within"
+)
+```
+
+### Reviews
+```{r}
+plm_p_user_reviews_by_year <- plm(reviews ~ lag_mean_elite_density,
+  data = user_by_year_ok,
+  index = c("user_id", "year"),
+  model = "pooling"
+)
+
+
+plm_fe_user_reviews_by_year <- plm(reviews ~ lag_mean_elite_density,
+  data = user_by_year_ok,
+  index = c("user_id", "year"),
+  model = "within"
+)
+```
+
+### Summary
+```{r results='asis'}
+rob_se_user <- list(
+  sqrt(diag(vcovHC(plm_p_user_ratings_by_year))),
+  sqrt(diag(vcovSCC(plm_fe_user_ratings_by_year))),
+  sqrt(diag(vcovHC(plm_p_user_reviews_by_year))),
+  sqrt(diag(vcovSCC(plm_fe_user_reviews_by_year)))
+)
+
+
+stargazer::stargazer(
+  plm_p_user_ratings_by_year,
+  plm_fe_user_ratings_by_year,
+  plm_p_user_reviews_by_year,
+  plm_fe_user_reviews_by_year,
+  se = rob_se_user,
+  type = "latex",
+  title = "Previous Mean Elite Fraction of Reviewed Restaurant vs. Current Rating and Review Count, Unbalanced Panel",
+  style = "aer",
+  align = TRUE,
+  dep.var.labels = c("Rating", "Review Count"),
+  covariate.labels = c(
+    "Mean Elite Fraction (lagged)"
+  ), add.lines = list(
+    c("Individual FE", "No", "Yes", "No", "Yes"),
+    c(
+      "Overall $R^{2}$",
+      round(r.squared(plm_p_user_ratings_by_year, model = "pooled"), 3),
+      round(r.squared(plm_fe_user_ratings_by_year, model = "pooled"), 3),
+      round(r.squared(plm_p_user_reviews_by_year, model = "pooled"), 3),
+      round(r.squared(plm_fe_user_reviews_by_year, model = "pooled"), 3)
+    ),
+    c(
+      "Within $R^{2}$", "", "<0.001",
+      "",
+      round(r.squared(plm_fe_user_reviews_by_year, model = "within"), 3)
+    )
+  ),
+  omit.stat = c("rsq", "adj.rsq"),
+  omit.table.layout = "n"
+)
+```
+
+
+## User-year level
+### Prepare data 
+```{r}
+res_by_year <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = lubridate::date(date), year = year(date)) %>%
+  group_by(business_id, year) %>%
+  summarise(
+    reviews = n_distinct(review_id),
+    elite_count = sum(effective_elite),
+    network_size = n_distinct(user_id), real_stars = mean(stars0, na.rm = TRUE)
+  ) %>%
+  arrange(business_id, year) %>%
+  # mutate(elite_density = elite_count / network_size) %>%
+  mutate(lag_elite_count = lag(elite_count, order_by = year)) %>%
+  filter(!is.na(lag_elite_count))
+
+by_ed <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = lubridate::date(date), year = year(date)) %>%
+  group_by(business_id, year) %>%
+  ungroup() %>%
+  distinct(business_id, year, .keep_all = TRUE) %>%
+  select(business_id, year, price_level, noise_level, parking) %>%
+  mutate(price_level = as.character(price_level)) %>%
+  arrange(business_id, year)
+
+res_by_year_ok <-
+  res_by_year %>%
+  ungroup() %>%
+  inner_join(by_ed, by = c("business_id", "year")) %>%
+  arrange(business_id, year)
+```
+
+### Ratings
+```{r}
+# OLS
+lm_res_reviews_by_year <-
+  res_by_year_ok %>%
+  lm(reviews ~ lag_elite_count+ price_level + noise_level + parking,
+    data = .
+  )
+
+# Panel
+## Pooling
+plm_p_res_ratings_by_year <-
+  res_by_year_ok %>%
+  plm(real_stars ~ lag_elite_count + price_level + noise_level + parking,
+    data = ., model = "pooling", index = c("business_id", "year")
+  )
+## Restaurant FE
+plm_fe_res_ratings_by_year <-
+  res_by_year_ok %>%
+  plm(real_stars ~ lag_elite_count + price_level + noise_level + parking,
+    data = ., model = "within", effect = "individual", index = c("business_id", "year")
+  )
+
+rob_se <- list(
+  sqrt(diag(vcovHC(plm_p_res_ratings_by_year))),
+  sqrt(diag(vcovSCC(plm_fe_res_ratings_by_year)))
+)
+
+stargazer::stargazer(
+  plm_p_res_ratings_by_year,
+  plm_fe_res_ratings_by_year,
+  se = rob_se,
+  type = "text",
+  title = "Previous Elite Count vs. the Current Review Count",
+  style = "aer",
+  align = TRUE,
+  column.labels = c("Pooling OLS", "Restaurant FE")
+)
+```
+
+
+### Reviews
+```{r}
+# OLS
+lm_res_reviews_by_year <-
+  res_by_year_ok %>%
+  lm(reviews ~ lag_elite_count + price_level + noise_level + parking,
+    data = .
+  )
+
+# Panel
+## Pooling
+plm_p_res_reviews_by_year <-
+  res_by_year_ok %>%
+  plm(reviews ~ lag_elite_count + price_level + noise_level + parking,
+    data = ., model = "pooling", index = c("business_id", "year")
+  )
+## Restaurant FE
+plm_fe_res_reviews_by_year <-
+  res_by_year_ok %>%
+  plm(reviews ~ lag_elite_count + price_level + noise_level + parking,
+    data = ., model = "within", effect = "individual", index = c("business_id", "year")
+  )
+
+rob_se <- list(
+  sqrt(diag(vcovHC(plm_p_res_reviews_by_year))),
+  sqrt(diag(vcovSCC(plm_fe_res_reviews_by_year)))
+)
+
+stargazer::stargazer(
+  plm_p_res_reviews_by_year,
+  plm_fe_res_reviews_by_year,
+  se = rob_se,
+  type = "text",
+  title = "Previous Elite Count vs. the Current Review Count",
+  style = "aer",
+  align = TRUE,
+  column.labels = c("Pooling OLS", "Restaurant FE")
+)
+```
+
+### Summary
+```{r}
+rob_se_res <- list(
+  sqrt(diag(vcovHC(plm_p_res_ratings_by_year))),
+  sqrt(diag(vcovSCC(plm_fe_res_ratings_by_year))),
+  sqrt(diag(vcovHC(plm_p_res_reviews_by_year))),
+  sqrt(diag(vcovSCC(plm_fe_res_reviews_by_year)))
+)
+
+
+stargazer::stargazer(
+  plm_p_res_ratings_by_year,
+  plm_fe_res_ratings_by_year,
+  plm_p_res_reviews_by_year,
+  plm_fe_res_reviews_by_year,
+  se = rob_se_res,
+  type = "latex",
+  title = "Previous Elite Count vs. the Current Review Count",
+  style = "aer",
+  align = TRUE,
+  dep.var.labels = c("Rating", "Review Count"),
+  covariate.labels = c(
+    "Elite count (lagged)", "Price level: \\$\\$", "Price level: \\$\\$\\$",
+    "Price level: \\$\\$\\$\\$", "Noise level: loud", "Noise level: quiet", "Noise level: very loud", "Parking"
+  ), omit.stat = c("adj.rsq", "rsq"),
+  add.lines = list(
+    c("Restaurant FE", "No", "Yes", "No", "Yes"),
+    c(
+      "Overall $R^{2}$",
+      round(r.squared(plm_p_res_ratings_by_year, model = "pooled"), 3),
+      round(r.squared(plm_fe_res_ratings_by_year, model = "pooled"), 3),
+      round(r.squared(plm_p_res_reviews_by_year, model = "pooled"), 3),
+      round(r.squared(plm_fe_res_reviews_by_year, model = "pooled"), 3)
+    ),
+    c(
+      "Within $R^{2}$", "", "< 0.001",
+      "",
+      round(r.squared(plm_fe_res_reviews_by_year, model = "within"), 3)
+    )
+  ), notes.append = FALSE,
+  omit.table.layout = "n"
+)
+
+```
+
+```{r}
+plm_fe_res_ratings_by_year %>% summary()
+```
+
+
+
+
+
+# Results detail
+```{r}
+rob_se_pc <- list(sqrt(diag(vcovHC(lm_review_pc))))
+stargazer::stargazer(
+  lm_review_pc,
+  type = "latex",
+  title = "Previous Elite density vs. the current review count (percentage change)",
+  style = "aer",
+  align = TRUE,
+  se = rob_se_pc,
+  dep.var.labels = c("Percentage change in restaurant review count"),
+  covariate.labels = c(
+    "Elite density (lagged)", "Price level: \\$\\$", "Price level: \\$\\$\\$",
+    "Price level: \\$\\$\\$\\$", "Noise level: loud", "Noise level: quiet", "Noise level: very loud", "Parking"
+  ), omit.stat = c("rsq"), omit.table.layout = "n"
+)
+```
+

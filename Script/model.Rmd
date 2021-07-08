@@ -1,0 +1,792 @@
+---
+title: "Model"
+author: "Lowson Li, R08323023"
+output:
+  html_notebook:
+    code_folding: show
+    highlight: tango
+    number_sections: yes
+    theme: simplex
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    df_print: paged
+    toc: yes
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+# Load packages
+```{r}
+library(tidyverse)
+library(knitr)
+library(readr)
+library(skimr)
+library(lubridate)
+library(stargazer)
+library(ggthemes)
+```
+
+# Model
+In Model 1, I would like to explore the possible effect of the Elite account to the measurable of the businesses, especially the ratings.
+
+## Load data 
+(T)
+
+```{r}
+library(readr)
+bru_full <- read_csv("~/yelp_project/Data/bru_full.csv", 
+    col_types = cols(yelping_since = col_character(), 
+        elite = col_character(), date = col_character()))
+problems(bru_full)
+```
+
+## Skim data
+```{r}
+skim(bru_full)
+```
+
+
+
+## Prepare data
+
+(Since there may exist problems loading file with large amount of text, without-text version of the file is loaded.)
+```{r}
+# deal with problematic missing 
+bru_full %>% 
+  filter(is.na(b_stars))
+```
+
+```{r}
+library(readr)
+bru_no_review_text <- read_csv("../Data/bru_no_review_text.csv",
+  col_types = cols(
+    date = col_character(),
+    elite = col_character(), is_open = col_logical(),
+    yelping_since = col_character(),
+    postal_code = col_character()
+  )
+)
+```
+
+
+```{r echo=TRUE}
+# adjust time format and dummy for elite
+bru_no_review_text <-
+  bru_no_review_text %>%
+  # sample_n(100) %>%
+  mutate(has_elite = if_else(is.na(elite), 0, 1)) %>%
+  mutate(days_diff = difftime(time1 = "2019-12-31", time2 = date(yelping_since), units = "days") %>% as.numeric()) %>%
+  mutate(yelping_years = round(days_diff / 365, 3)) %>%
+  select(-days_diff)
+```
+
+```{r echo=TRUE}
+# Notice that the official data may contain wrong average ratings on businesses!
+bru_no_review_text %>% 
+  group_by(business_id) %>% 
+  mutate(elite_count = sum(has_elite),network_size = n_distinct(user_id)) %>% 
+  distinct(business_id,.keep_all = TRUE) %>% 
+  filter(b_stars > 5)
+
+# Use the mean of the review stars will be more conservative.
+```
+```{r}
+# Check the restaurants without any reviewers
+bru_no_review_text %>% 
+  filter(is.na(user_id))
+# When the data is extracted from neo4j, this kind of restaurants are not selected.
+```
+
+## Detect the cross-sectional effect of elite on business measuarables
+### Ratings
+```{r}
+# create business group statistics
+bru_no_review_text %>% 
+  group_by(business_id) %>% 
+  mutate(elite_count = sum(has_elite),network_size = n_distinct(user_id)) %>% 
+  distinct(business_id,.keep_all = TRUE) %>% 
+  colnames()
+```
+
+### Simple linear regression
+```{r}
+# simple linear regression without much of business statistics
+bru_no_review_text %>% 
+  group_by(business_id) %>% 
+  mutate(elite_count = sum(has_elite),network_size = n_distinct(user_id)) %>% 
+  mutate(real_stars = mean(r_stars,na.rm = TRUE)) %>% 
+  distinct(business_id,.keep_all = TRUE) %>% 
+  lm(formula = real_stars ~ elite_count + log(network_size)) %>% 
+  stargazer(type = "text")
+```
+
+In this simple linear regression, the number of Elite reviewers has slight effect on the overall ratings of the restaurants, conditional on the total review count and the size of the reviewers of the restaurants.
+Intuitively, Elite may be more "picky" so that the ratings they give is relatively low compare to the non Elite.
+
+To test this assumption, we can run a simple regression compare the average ratings between Elite and non-Elite reviewers.
+
+```{r}
+bru_no_review_text %>% 
+  lm(data = ., formula = r_stars ~ has_elite  + review_count + yelping_years + useful + fans) %>%
+  stargazer(type = "text")
+```
+
+While the result suggest that control for basic characteristics of the reviewers, the Elite account seems to give higher stars to the business. This is contradict to the previous intuition that the Elite is more picky in terms of rating. On the other hand, if the Elite account has similar taste of the general public, the rating he/she gives would not have much differences. Possible **astroturfing** may exist. 
+
+Also, intuitively, when the network gets larger, the Elite account in the reviewer network of the businesses would get larger, though may not proportionally. 
+
+### Elite count vs. nework size (tbd)
+```{r}
+# library
+library(ggplot2)
+library(ggExtra)
+
+# classic plot :
+p <-
+  bru_no_review_text %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(has_elite), network_size = n_distinct(user_id)) %>%
+  mutate(real_stars = mean(r_stars, na.rm = TRUE)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  # ungroup() %>% 
+  # sample_n(size = 100) %>%  
+  ggplot(data = ., aes(x = log(network_size), y = log(elite_count), color = elite_density)) +
+  geom_point() +
+  theme(legend.position = "none")
+
+ggMarginal(p, type = "histogram", size = 10)
+```
+
+The logged network size of the restaurants and logged number of Elite reviewers seems to be linearly correlated. While the density of the Elite account seems to present some variation.  
+
+```{r}
+bru_no_review_text %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(has_elite), network_size = n_distinct(user_id)) %>%
+  mutate(real_stars = mean(r_stars, na.rm = TRUE)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  ggplot(aes(x = elite_density)) +
+  geom_density() +
+  theme_economist()
+```
+Notice that the distribution of Elite density in the network is right-skewed.
+
+### Use Elite density as independent variable
+```{r}
+bru_no_review_text %>% 
+  group_by(business_id) %>%
+  mutate(elite_count = sum(has_elite), network_size = n_distinct(user_id)) %>%
+  mutate(real_stars = mean(r_stars, na.rm = TRUE)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  lm(formula = real_stars ~ elite_density) %>% 
+  stargazer(type = "text")
+```
+
+Notice that the average ratings of businesses has postive correlation with the Elite density.
+
+The model problems so far: 
+
+1. The original model may suffer Omitted Variable Bias
+2. The dependent variable here is limited, since the rating is larger than 1 and smaller than 5.
+3. Astroturfing
+4. The multicollinearity of the network size and the Elite count. 
+
+Use Censored Regression Models may be more appropriate.
+
+### Censored regression (Tobit)
+```{r}
+# Tobit model for right censored dependent variable
+# For more details: https://cran.r-project.org/web/packages/censReg/vignettes/censReg.pdf
+library(censReg)
+bru_no_review_text %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(has_elite), network_size = n_distinct(user_id)) %>%
+  mutate(real_stars = mean(r_stars, na.rm = TRUE)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  distinct(business_id, .keep_all = TRUE) %>% 
+  censReg(formula = real_stars ~ elite_density, left = 1, right = 5) %>%
+  # stargazer(type = "text")
+  summary()
+```
+
+The result suggest that the density of the Elite in reviewer network of the restaurants has overall positive effect on ratings.
+Intuitively, this may result from the fact the Elite account post relatively more positive reviews for the business. 
+
+
+1. The result can be refine if the proportion of the sentiment is revealed.
+2. More of the business characteristics should be included.
+
+## Extract sentiment 
+### Estimate the cost of calling Google NL API
+```{r}
+bru_full %>% 
+  filter(!is.na(text)) %>% 
+  nrow()
+```
+
+[The official charging of sentiment analysis](https://cloud.google.com/natural-language/pricing?utm_source=google&utm_medium=cpc&utm_campaign=japac-TW-all-en-dr-skws-all-all-trial-b-dr-1009137&utm_content=text-ad-none-none-DEV_c-CRE_252507627318-ADGP_Hybrid%20%7C%20AW%20SEM%20%7C%20SKWS%20~%20T1%20%7C%20BMM%20%7C%20ML%20%7C%20M%3A1%20%7C%20TW%20%7C%20en%20%7C%20Language%20%7C%20API-KWID_43700024603600853-kwd-296866631184&userloc_1012825-network_g&utm_term=KW_%2Bnatural%20%2Blanguage%20%2Bapi&gclid=Cj0KCQjwgo_5BRDuARIsADDEntRhiWPOIS1Req1eYVowcZxkJcasl7B7kPpHIlB6UKW2xppChr9WzrkaAuwmEALw_wcB)
+
+```{r}
+(365417)/1000
+```
+It's about USD 360. 
+
+### Test the validation of the Goolge NL API
+```{r}
+bru_full %>% 
+  select(user_id,has_elite,text) %>% 
+  filter(str_detect(user_id,"9gZ4pQHdK6v8xMLig6EEFA")) %>% 
+  sample_n(10) %>% 
+  select(text) %>% unlist()
+```
+
+## Elite and rating outperformance
+
+### Business ratings distribution
+```{r}
+bru_no_review_text %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(has_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  mutate(real_stars = mean(r_stars, na.rm = TRUE)) %>%
+  # mutate(star_sd = sd(real_stars,na.rm=TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  ggplot(aes(x = real_stars)) +
+  geom_density() +
+  theme_economist()
+```
+See the top 20% and bottom 20% ratings of business
+```{r}
+bru_temp <-
+  bru_no_review_text %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(has_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  mutate(real_stars = mean(r_stars, na.rm = TRUE)) %>%
+  # mutate(star_sd = sd(real_stars,na.rm=TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE)
+
+quantile(bru_temp$real_stars,probs = c(0.2,0.8))
+```
+
+```{r}
+ggplot(bru_temp , aes(x = elite_density, y = real_stars)) +
+  geom_point(alpha = 0.4) +
+  theme_economist()
+```
+
+Notice that the Elite density of the reviewer network of the businesses is not directly correlated to the real ratings.
+
+```{r}
+logit_1 <-
+  bru_temp %>%
+  mutate(outperformed = if_else(real_stars > 4.222402 , 1, 0)) %>%
+  glm(formula = outperformed ~ elite_density, data = ., family = "binomial")
+logit_2 <-
+  bru_temp %>%
+  mutate(outperformed = if_else(real_stars > 4.222402 , 1, 0)) %>%
+  glm(formula = outperformed ~ elite_density + log(network_size), data = ., family = "binomial")
+
+stargazer(logit_1, logit_2, type = "text")
+
+```
+
+Here I consider the network size as the **development status** of the restaurants. Which can be the proxy of the opening years, business in Yelp since, or the popularity in reviewers' perspective.
+
+```{r}
+ggplot(bru_temp , aes(x = network_size, y = elite_density)) +
+  geom_point(alpha = 0.2) +
+  theme_economist()
+```
+
+```{r}
+ggplot(bru_temp , aes(x = log(network_size), y = elite_density)) +
+  geom_point(alpha = 0.2) +
+  theme_economist()
+```
+```{r}
+lm(formula = elite_density ~ log(network_size),data = bru_temp) %>% summary()
+```
+
+Though may suffer from OVB, but intuitively there exists the possibility that the more popular (in terms of more reviews) restaurants will attract more Elite to leave their comment. This is somehow implying the hypothetical phenomenon called **preferential attachment**.
+
+Notice that none of these regression result suggest that the Elite density of the reviewer network of the restaurants has strong correlation on business overall reviews! 
+Consider that in the real world, the Elite account has small amount. While it could potentially affect the ratings formation of others. Maybe we can try to recover the baseline ratings without Elite account's effect, and compare how this would be different after the first Elite had joined. 
+
+
+## Potential causal effect
+```{r}
+bru_no_review_text %>% 
+  colnames()
+```
+
+### Recover the unbiased ratings 
+```{r echo=TRUE}
+# deal with the review datetime 
+bru_no_review_text %>% 
+  select(date) %>% glimpse()
+
+bru_no_review_text %>% 
+  select(date) %>% 
+  mutate(date = lubridate::parse_date_time(date,"ymd HMS")) %>% 
+  glimpse()
+```
+
+```{r}
+bru_no_review_text %>% 
+  select(business_id,date, user_id,has_elite) %>% 
+  group_by(business_id) %>% 
+  arrange(business_id,date) %>% head(10) 
+```
+
+
+```{r}
+# detect the effective Elite 
+bru_no_review_text %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  select(review_year, elite) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>%
+  filter(effective_elite == 1) %>%  # check the result
+  head(10)
+```
+
+```{r}
+bru_no_review_text %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>% 
+  group_by(business_id) %>% 
+  arrange(date) %>% 
+  head(100) %>% 
+  select(business_id,review_id,effective_elite)
+  
+```
+
+```{r}
+# test for some potential problematic record
+bru_no_review_text %>% 
+  filter(str_detect(review_id,"GIByOecDhrMXMaIOfvkZ0A"))
+```
+
+```{r}
+# recover the average ratings before Elite entered
+bru_no_review_text %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>%
+  group_by(business_id) %>%
+  arrange(business_id, date) %>%
+  mutate(group_order = row_number()) %>%
+  mutate(appeared_elite = cumsum(effective_elite)) %>%
+  mutate(primative_network = if_else(appeared_elite < 1, 1, 0)) %>%
+  ungroup() %>%
+  filter(primative_network == 1) %>% 
+  group_by(business_id) %>% 
+  summarise(real_stars = mean(r_stars)) %>% 
+  ungroup() %>% 
+  summarise(avg_b_stars = mean(real_stars))
+```
+
+When there's no any (effective) Elite enter the reviewer network of the restaurants, the average rating of business is around 3.68. While after the joining of the first Elite, the average business ratings becomes ... 
+
+
+```{r}
+# bru_temp <-
+  bru_no_review_text %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>%
+  group_by(business_id) %>%
+  arrange(business_id, date) %>%
+  mutate(group_order = row_number()) %>%
+  mutate(appeared_elite = cumsum(effective_elite)) %>%
+  mutate(evolved_network = if_else(appeared_elite < 1, 0, 1)) %>% 
+  mutate(b_has_elite = if_else(sum(appeared_elite)==0,0,1)) %>% 
+  filter(b_has_elite == 0) %>% 
+  distinct(business_id, .keep_all = TRUE) %>% 
+  nrow()
+```
+
+There are 368 restaurants has never comment by the Elite account.
+
+Let's see the overall performance of the restaurants:
+
+```{r}
+bru_no_review_text %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>%
+  group_by(business_id) %>%
+  arrange(business_id, date) %>%
+  mutate(group_order = row_number()) %>%
+  mutate(appeared_elite = cumsum(effective_elite)) %>%
+  mutate(evolved_network = if_else(appeared_elite < 1, 0, 1)) %>% 
+  mutate(b_has_elite = if_else(sum(appeared_elite)==0,0,1)) %>% 
+  ungroup() %>% 
+  distinct(business_id, .keep_all = TRUE) %>% 
+  group_by(b_has_elite) %>% 
+  summarise(avg_stars = mean(b_stars))
+```
+
+If the network has ever commented by Elite, overall, the restaurants' rating will increased 0.28 star, approx. 8.7% increased.
+
+```{r}
+library(censReg)
+cens1 <-
+  bru_no_review_text %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(has_elite), network_size = n_distinct(user_id)) %>%
+  mutate(real_stars = mean(r_stars, na.rm = TRUE)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  censReg(formula = real_stars ~ elite_density, left = 1, right = 5)
+
+
+bru_temp <-
+  bru_no_review_text %>%
+  group_by(business_id) %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>%
+  group_by(business_id) %>%
+  arrange(business_id, date) %>%
+  mutate(group_order = row_number()) %>%
+  mutate(appeared_elite = cumsum(effective_elite)) %>%
+  mutate(evolved_network = if_else(appeared_elite < 1, 0, 1)) %>%
+  mutate(b_has_elite = if_else(sum(appeared_elite) == 0, 0, 1)) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(real_stars = mean(r_stars, na.rm = TRUE)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  distinct(business_id, .keep_all = TRUE)
+
+cens2 <-
+  bru_temp %>%
+  censReg(formula = real_stars ~ elite_density, left = 1, right = 5)
+
+cens3 <-
+  bru_temp %>%
+  censReg(formula = real_stars ~ elite_density + log(network_size), left = 1, right = 5)
+
+cens4 <-
+  bru_temp %>%
+  censReg(formula = b_stars ~ elite_density + log(network_size), left = 1, right = 5)
+
+stargazer(cens1, cens2, cens3, cens4,type = "text")
+```
+
+Here we can find that the models with the **real stars** as dependent variable have lower AIC and BIC. Real stars is the ratings collected by the given ratings in each review, instead of directly inherit from the data set.
+
+Distribution of independent variables
+```{r}
+bru_temp %>% 
+  ungroup() %>% 
+  mutate(log_network_size = log(network_size)) %>% 
+  select(log_network_size, elite_density) %>% 
+  skimr::skim()
+```
+
+
+The marginal effect of the third model, mean of the independent variable
+
+```{r}
+margEff(cens3) %>% summary()
+```
+
+The marginal effect of the third model, 75 percentile of the independent variable
+```{r}
+margEff(cens3, xValues = c(1,0.192,5.03)) %>% summary()
+```
+
+We can show that there's not distribution difference between theses 2 ratings.
+
+```{r}
+# Wilcoxon signed rank test.
+wilcox.test(x = bru_temp$real_stars,y=bru_temp$b_stars)
+```
+
+The distribution of the ratings have no significant differences.
+
+### Timeline of reviewers
+
+Pick the 75th percentile size of network 
+```{r}
+set.seed(2020)
+bru_temp %>% 
+  ungroup() %>% 
+  mutate(log_network_size = log(network_size)) %>% 
+  filter(log_network_size>(5.03-1.47),log_network_size<(5.03+1.47)) %>% 
+  sample_n(1) %>% 
+  select(business_id)
+```
+
+```{r}
+bru_no_review_text %>%
+  group_by(business_id) %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>%
+  filter(business_id == "Tp07u-0AOFRfQhtNpAXaQA") %>%
+  arrange(business_id, date) %>%
+  mutate(cummean_stars = cummean(r_stars)) %>%
+  ungroup() %>%
+  arrange(date) %>%
+  select(date, review_id, user_id, effective_elite, fans, r_stars, cummean_stars) %>%
+  mutate(date = as.Date(date), effective_elite = as.character(effective_elite)) %>%
+  ggplot(aes(x = date, y = r_stars)) +
+  geom_line(aes(y = zoo::rollmean(r_stars, 21, fill = NA)), color = "grey") +
+  geom_line(aes(y = cummean_stars)) +
+  geom_jitter(aes(size = fans, color = effective_elite), shape = 21, height = 0.2, width = 0.2) +
+  theme_economist()
+```
+
+Most of time, it's unclear that what Elite has any effect on making any visible impact on the later ratings by normal users.
+While sometimes the story could be interesting. 
+
+```{r}
+bru_no_review_text %>%
+  group_by(business_id) %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>%
+  filter(business_id == "najluTSbgZEpCdLIbpvnxQ") %>%
+  arrange(business_id, date) %>%
+  mutate(cummean_stars = cummean(r_stars)) %>%
+  ungroup() %>%
+  arrange(date) %>%
+  select(date, review_id, user_id, effective_elite, fans, r_stars, cummean_stars) %>%
+  mutate(date = as.Date(date), effective_elite = as.character(effective_elite)) %>%
+  ggplot(aes(x = date, y = r_stars)) +
+  geom_line(aes(y = zoo::rollmean(r_stars, 21, fill = NA)), color = "grey") +
+  geom_line(aes(y = cummean_stars)) +
+  geom_jitter(aes(size = fans, color = effective_elite), shape = 21, height = 0.2, width = 0.2) +
+  theme_economist()
+```
+
+Take this restaurant for example, when the early Elites rated at 4 or even fewer, there would be bunch of non-Elite users rated 5. While in the same year, the Elites gave relatively low ratings. 
+
+Is Elite more picky so that they gave relatively low ratings? Or is Elite is not picky, but the normal users gave the ratings more generous? 
+
+Is the ratings could possible be manipulated by the restaurants?
+
+
+When we talking about someone is picky, it means that **from the his/her comment history, the probability of giving high compliment is relatively low, comparing to others** 
+
+### Is Elite more picky?
+```{r}
+# Loading average ratings of related users
+library(readr)
+avg_ratings <- read_csv("~/yelp_project/Data/avg_ratings.csv")
+bru_temp <-
+  bru_no_review_text %>%
+  left_join(avg_ratings, by = "user_id") %>%
+  group_by(business_id) %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>%
+  ungroup()
+```
+
+```{r}
+bru_temp %>% 
+  distinct(user_id, .keep_all = TRUE) %>% 
+  select(Average_stars) %>% 
+  skimr::skim()
+```
+
+Does the average personal historical ratings have the same distribution?
+
+```{r}
+# Wilcoxon signed rank test.
+bru_temp_star <-
+  bru_temp %>%
+  group_by(user_id) %>%
+  mutate(average_stars_AZ = mean(r_stars)) %>%
+  ungroup() %>% 
+  distinct(user_id, .keep_all = TRUE)
+
+wilcox.test(x = bru_temp_star$average_stars_AZ,y = bru_temp_star$Average_stars,paired = TRUE)
+```
+
+By the Wilcoxon signed rank test, we find that the average ratings given by the user for AZ restaurants is different from their own historical ratings. 
+
+```{r}
+wilcox.test(x = bru_temp_star$average_stars_AZ,y = bru_temp_star$Average_stars,paired = TRUE,alternative = "greater")
+```
+
+We also find that the PX,AZ restaurants got higher ratings compares to the average historical rating of the users.
+But this may also implies that the AZ restaurants raters prefer PX,AZ than other city. 
+
+
+```{r}
+lm_low <-
+  bru_temp %>%
+  mutate(lower_ratings = if_else(r_stars < (3.79 - 1.12), 1, 0)) %>%
+  lm(formula = lower_ratings ~ effective_elite)
+
+
+lm_mid <-
+  bru_temp %>%
+  mutate(mid_ratings = if_else(r_stars > (3.79 - 1.12) & r_stars < (3.79 + 1.12), 1, 0)) %>%
+  lm(formula = mid_ratings ~ effective_elite)
+
+lm_high <-
+  bru_temp %>%
+  mutate(higher_ratings = if_else(r_stars > (3.79 + 1.12), 1, 0)) %>%
+  lm(formula = higher_ratings ~ effective_elite)
+
+logit_low <-
+  bru_temp %>%
+  mutate(lower_ratings = if_else(r_stars < (3.79 - 1.12), 1, 0)) %>%
+  glm(formula = lower_ratings ~ effective_elite, family = "binomial")
+
+logit_mid <-
+  bru_temp %>%
+  mutate(mid_ratings = if_else(r_stars > (3.79 - 1.12) & r_stars < (3.79 + 1.12), 1, 0)) %>%
+  glm(formula = mid_ratings ~ effective_elite, family = "binomial")
+
+logit_high <-
+  bru_temp %>%
+  mutate(higher_ratings = if_else(r_stars > (3.79 + 1.12), 1, 0)) %>%
+  glm(formula = higher_ratings ~ effective_elite, family = "binomial")
+
+stargazer(lm_low, lm_mid, lm_high, logit_low, logit_mid, logit_high, type = "text")
+```
+
+Overall, it is less likely that the Elite would give lower ratings than non-Elite reviewers.
+
+But does that means Elite rate more generously than non-Elite?
+
+Seems not,it is less likely that the Elite would give higher ratings than non-Elite reviewers.
+
+While interestingly, the Elite account seems to be more conservative in ratings. It is more likely that the Elite would give normal ratings, which means we can expect the density of ratings is more concentrated for Elite.
+
+```{r}
+# distribution of review ratings, Elite vs Non-Elite 
+
+bru_temp %>%
+  mutate(effective_elite = as.character(effective_elite)) %>%
+  ggplot(aes(x = r_stars, fill = effective_elite)) +
+  geom_histogram(alpha = 0.6, position = "dodge") +
+  ggthemes::theme_economist()
+```
+
+### Rating behavior
+```{r}
+rating_behavior <-
+  bru_temp %>%
+  group_by(business_id, effective_elite) %>%
+  summarise(avg_ratings = mean(r_stars, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(business_id, effective_elite) %>%
+  mutate(effective_elite = if_else(effective_elite == 1, "Elite", "Normal")) %>%
+  pivot_wider(names_from = effective_elite, values_from = avg_ratings)
+# mutate(Elite = if_else(is.na(Elite), 0, Elite)) %>%
+# mutate(Normal = if_else(is.na(Normal), 0, Normal))
+
+network_size <-
+  bru_no_review_text %>%
+  group_by(business_id) %>%
+  summarise(network_size = n_distinct(user_id))
+
+rating_behavior %>%
+  left_join(y = network_size, by = "business_id") %>%
+  mutate(log_network_size = log(network_size)) %>%
+  # skimr::skim()
+  mutate(
+    network_scale =
+      case_when(
+        log_network_size < 2.71 ~ "Tiny",
+        (log_network_size >= 2.71 & log_network_size < 3.85) ~ "Small",
+        (log_network_size >= 3.85 & log_network_size < 5.03) ~ "Medium",
+        log_network_size >= 5.03 ~ "Large",
+        TRUE ~ NA_character_
+      )
+  ) %>%
+  ggplot(aes(x = Elite, y = Normal, color = log(network_size))) +
+  geom_point(alpha = 0.1) +
+  geom_abline(intercept = 0, slope = 1, color = "grey") +
+  geom_smooth() +
+  # geom_smooth(method = "lm") +
+  scale_colour_viridis_c() +
+  facet_grid(cols = vars(network_scale)) +
+  theme_minimal()
+```
+
+```{r}
+rating_behavior %>%
+  left_join(y = network_size, by = "business_id") %>%
+  mutate(log_network_size = log(network_size)) %>%
+  # skimr::skim()
+  mutate(
+    network_scale =
+      case_when(
+        log_network_size < 2.71 ~ "Tiny",
+        (log_network_size >= 2.71 & log_network_size < 3.85) ~ "Small",
+        (log_network_size >= 3.85 & log_network_size < 5.03) ~ "Medium",
+        log_network_size >= 5.03 ~ "Large",
+        TRUE ~ NA_character_
+      )
+  ) %>%
+  ggplot(aes(x = Elite, y = Normal, color = log(network_size))) +
+  geom_point(alpha = 0.1) +
+  geom_abline(intercept = 0, slope = 1, color = "grey") +
+  geom_smooth(method = "lm") +
+  scale_colour_viridis_c() +
+  facet_grid(cols = vars(network_scale)) +
+  theme_minimal()
+```
+The first plot visualize the conditional mean of the Normal users' average ratings on businesses given the Elite's average ratings.
+The second plot visualize the potential linear relationship between Elite's average rating ans Normal users'. 
+
+Tough we are using sampled data, but if we consider this is the sample snapshot of the account identity differences in ratings between Elite and Normal reviewers across the difference size of the businesses review network, this will provide some interesting observation: 
+
+What?
+
+1. Identity difference in ratings is getting smaller when the network size getting larger.
+2. Variance in distribution is relatively large when the network size is small.
+
+Is it true?
+```{r}
+size_and_density <-
+  bru_no_review_text %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer())) %>%
+  group_by(business_id) %>%
+  mutate(network_size = n_distinct(user_id), elite_density = sum(effective_elite) / n()) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, network_size, elite_density)
+
+
+rb1 <-
+  rating_behavior %>%
+  left_join(y = size_and_density, by = "business_id") %>%
+  mutate(log_network_size = log(network_size)) %>%
+  censReg::censReg(formula = Normal ~ Elite, left = 1, right = 5)
+rb2 <-
+  rating_behavior %>%
+  left_join(y = size_and_density, by = "business_id") %>%
+  mutate(log_network_size = log(network_size)) %>%
+  censReg::censReg(formula = Normal ~ Elite + log(network_size), left = 1, right = 5)
+rb3 <-
+  rating_behavior %>%
+  left_join(y = size_and_density, by = "business_id") %>%
+  mutate(log_network_size = log(network_size)) %>%
+  censReg::censReg(formula = Normal ~ Elite + elite_density, left = 1, right = 5)
+rb4 <-
+  rating_behavior %>%
+  left_join(y = size_and_density, by = "business_id") %>%
+  mutate(log_network_size = log(network_size)) %>%
+  censReg::censReg(formula = Normal ~ Elite + log(network_size) + elite_density, left = 1, right = 5)
+
+stargazer(rb1, rb2, rb3, rb4, type = "text")
+```
+
+## Previous elite vs. current restaurant status
+
+
+
+

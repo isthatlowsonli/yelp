@@ -1,0 +1,1572 @@
+---
+title: "Model - Business-centric"
+author: "Lowson Li, R08323023"
+output:
+  html_notebook:
+    code_folding: show
+    highlight: tango
+    number_sections: yes
+    theme: simplex
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  html_document:
+    df_print: paged
+    toc: yes
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+# Load packages
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(readr)
+library(skimr)
+library(lubridate)
+library(stargazer)
+library(ggthemes)
+```
+
+# Introduction
+
+In this section, we would like to further explore the role of the elite plays to the restaurants.
+
+First of all, one has debating that leverage KOL has any effect on shaping the reputation or the popularity of the business.
+
+For the reputation of the restaurant of the current time, we can reconstruct the in-data stars during the given periods, i.e. 1 year.
+
+$$
+\begin{align}
+rating_{t} &= \alpha + \beta X + \gamma eliteDensity_{t-1}  + \epsilon \\
+rating_{t} &= \alpha + \beta X + \gamma log(\frac{elite_{t-1}}{size_{t-1}})  + \epsilon \\
+\end{align}
+$$
+
+While since most of the restaurants attributes can be consider to be time-invariant, there's no underscore $t$ for $X$.
+
+# Prepare data
+
+First of all, the attributes is compress in the data of JSON format. We only attract relatively important attribute of the restaurants such as **price level** and **parking**.
+
+This step could be done in the **Dremio**, **2,649** restaurants in PX, AZ are selected.
+
+## Summary statistics of the filter restaurants
+
+```{r}
+# import data
+library(readr)
+explore_b <- read_csv("~/yelp_project/Data/explore_b.csv")
+
+# show columns imported
+colnames(explore_b)
+```
+
+```{r}
+# adjust data type
+explore_b <-
+  explore_b %>%
+  mutate(postal_code = as.character(postal_code)) 
+
+# skim data
+explore_b %>%
+  select(business_id, stars, review_count, postal_code, price_level, good_for_kids,alcohol, good_for_group, noise_level, parking, outdoor_seat, credit_card, wifi, take_out) %>%
+  skim()
+```
+
+## Join with review and user data
+
+This step is done in **Dremio**.
+
+```{r}
+# import data 
+library(readr)
+explore_bru <- read_csv("~/yelp_project/Data/explore_bru.csv", 
+    col_types = cols(date = col_character(), 
+        yelping_since = col_character(), 
+        elite = col_character()))
+```
+
+```{r}
+explore_bru %>% 
+  skim()
+```
+
+## Define effective elite
+
+```{r}
+explore_bru <-
+  explore_bru %>%
+  mutate(review_year = str_extract(date, "^\\d{4}")) %>%
+  mutate(effective_elite = if_else(is.na(elite), 0L, str_detect(elite, review_year) %>% as.integer()))
+```
+
+## Recover in-data rating, comment size, and elite density
+
+```{r}
+# demonstration on recover in-data rating, comment size, and elite density.
+explore_bru %>% 
+  group_by(business_id) %>% 
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  distinct(business_id, .keep_all = TRUE) %>% 
+  select(business_id,real_stars,elite_density) %>% 
+  head(10)
+```
+
+# Elite and reputation of restaurants
+
+Since the rating is larger than 1 and less than 5, the ratings, the proxy of restaurant reputation, is a kind of censored dependent variable. Censored regression suits.
+
+## Previous Elite density vs. current ratings
+
+```{r}
+# skim review date
+explore_bru %>% 
+  group_by(business_id) %>% 
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>% 
+  mutate(date = as.Date(date)) %>% 
+  select(date) %>% 
+  skim()
+```
+
+```{r}
+# comment time distribution
+explore_bru %>% 
+  group_by(business_id) %>% 
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>% 
+  mutate(year = str_extract(date,"\\d{4}")) %>% 
+  select(year) %>% 
+  group_by(year) %>% 
+  summarise(count = n()) %>% 
+  mutate(freq = paste0(round(count/sum(count),4)*100, "%"))
+```
+
+```{r}
+# check the control characteristics of restaurants
+# Location
+explore_b %>% 
+  group_by(postal_code) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  mutate(freq = paste0(round(count/sum(count),4)*100," %"))
+```
+
+Notice that among the selected restaurants, 57 distinct postal code are detected. In some of the region, only one restaurant are sampled.
+
+```{r}
+# Price level
+explore_b %>% 
+  ggplot(aes(x = price_level)) +
+  geom_histogram(alpha = 0.6, position = "dodge") +
+  ggthemes::theme_economist()
+```
+
+```{r}
+explore_b %>% 
+  group_by(price_level) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  mutate(freq = paste0(round(count/sum(count),3)*100," %"))
+  
+```
+
+```{r}
+# Ambience: Noise
+explore_b %>% 
+  group_by(noise_level) %>%
+  summarise(count = n()) %>% 
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count), 3) * 100, " %"))
+```
+
+```{r}
+# Ambience: Noise plot
+explore_b %>% 
+  group_by(noise_level) %>%
+  summarise(count = n()) %>% 
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count), 4) * 100, " %")) %>% 
+  filter(!is.na(noise_level)) %>%
+  ggplot(aes(x = factor(noise_level,levels = c("quiet","average","loud","very_loud")),y  = count)) +
+  geom_col() +
+  xlab("Noise level") +
+  theme_economist()
+```
+
+```{r}
+# Convenience: parking
+explore_b %>%
+  group_by(parking) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count),2) * 100, " %"))
+```
+
+```{r}
+# Convenience: outdoor seating
+explore_b %>%
+  group_by(outdoor_seat) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count),2) * 100, " %"))
+```
+
+```{r}
+# Convenience: WiFi
+explore_b %>%
+  group_by(wifi) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count),2) * 100, " %"))
+```
+
+```{r}
+# Convenience: Delivery
+explore_b %>%
+  group_by(delivery) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count),2) * 100, " %"))
+```
+
+```{r}
+# Convenience: good for group
+explore_b %>%
+  group_by(good_for_group) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count),2) * 100, " %"))
+```
+
+```{r}
+# Convenience: good for kid
+explore_b %>%
+  group_by(good_for_kids) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count),2) * 100, " %"))
+```
+
+```{r}
+# Convenience: take out
+explore_b %>%
+  group_by(take_out) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count),2) * 100, " %"))
+```
+
+```{r}
+# Convenience: Credit card
+explore_b %>%
+  group_by(credit_card) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(freq = paste0(round(count / sum(count),2) * 100, " %"))
+```
+
+```{r}
+# prepare half-year lag
+half_year <-
+  explore_bru %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date > 183) %>%
+  # select(business_id, review_id, user_id, date) %>%
+  # head(10)
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>% 
+  distinct(business_id, .keep_all = TRUE)
+
+# prepare 1 year lag
+one_year <-
+  explore_bru %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date > 365) %>%
+  # select(business_id, review_id, user_id, date) %>%
+  # head(10)
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>% 
+  distinct(business_id, .keep_all = TRUE)
+
+# prepare 2 year lag
+two_year <-
+  explore_bru %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date > 730) %>%
+  # select(business_id, review_id, user_id, date) %>%
+  # head(10)
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>% 
+  distinct(business_id, .keep_all = TRUE)
+
+# prepare 3 year lag
+three_year <-
+  explore_bru %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date > 1095) %>%
+  # select(business_id, review_id, user_id, date) %>%
+  # head(10)
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>% 
+  distinct(business_id, .keep_all = TRUE)
+
+# prepare 4 year lag
+four_year <-
+  explore_bru %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date > 1460) %>%
+  # select(business_id, review_id, user_id, date) %>%
+  # head(10)
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>% 
+  distinct(business_id, .keep_all = TRUE)
+
+# prepare 5 year lag
+five_year <-
+  explore_bru %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date > 1825) %>%
+  # select(business_id, review_id, user_id, date) %>%
+  # head(10)
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>% 
+  distinct(business_id, .keep_all = TRUE)
+
+# prepare regression
+
+library(censReg)
+
+linear <-
+  half_year %>%
+  lm(formula = real_stars ~ elite_density + price_level + noise_level + parking)
+
+cens_half <-
+  half_year %>%
+  censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_one <-
+  one_year %>%
+  censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_two <-
+  two_year %>%
+  censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_three <-
+  three_year %>%
+  censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_four <-
+  four_year %>%
+  censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_five <-
+  five_year %>%
+  censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+stargazer(linear,cens_half, cens_one, cens_two, cens_three, type = "html", title = "Previous Elite density vs. the current ratings", style = "aer", align = TRUE, column.labels = c("linear half-year","half-year", "1 year", "2 year", "3 year"))
+```
+## EBA
+
+```{r}
+library(ExtremeBounds)
+
+naive.eba <-
+  eba(
+    data = half_year,
+    y = "real_stars",
+    free = "elite_density",
+    doubtful = c(
+      "good_for_kids", "outdoor_seat", "credit_card", "delivery", "alcohol",
+      "good_for_group", "wifi", "take_out", "noise_level", "parking",
+      "price_level"
+    ),
+    focus = c("noise_level", "parking", "price_level")
+  )
+
+hist(naive.eba)
+```
+
+## Previous Elite density vs. current half-year ratings
+
+```{r}
+# check the max date of review
+explore_bru %>% 
+  ungroup() %>% 
+  mutate(date = as.Date(date)) %>%
+  summarise(max_date = max(date))
+```
+
+```{r}
+# construct half-year label
+explore_bru %>% 
+  ungroup() %>% 
+  mutate(date = as.Date(date)) %>%
+  mutate(half_year = if_else(as.Date("2018-12-31")-date < 183,1,0)) %>% 
+  group_by(business_id,half_year) %>% 
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(half_year) %>% 
+  summarise(real_avg_stars = mean(real_stars), reviews = n()) 
+```
+
+```{r}
+# we can also compare the certain years: eg. before:0.5y, after:0.5y
+explore_bru %>% 
+  ungroup() %>% 
+  mutate(date = as.Date(date)) %>%
+  mutate(half_year = if_else(as.Date("2018-12-31")-date < 183,1,0)) %>% 
+  filter(!as.Date("2018-12-31")-date > 365) %>% 
+  group_by(business_id,half_year) %>% 
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(half_year) %>% 
+  summarise(real_avg_stars = mean(real_stars),reviews = n()) 
+```
+
+Notice that the difference may seems smaller.
+
+```{r}
+# we can also compare the certain years: eg. before:1y, after:1y
+explore_bru %>% 
+  ungroup() %>% 
+  mutate(date = as.Date(date)) %>%
+  mutate(one_year = if_else(as.Date("2018-12-31")-date < 365,1,0)) %>% 
+  filter(!as.Date("2018-12-31")-date > 730) %>% 
+  group_by(business_id,one_year) %>% 
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(one_year) %>% 
+  summarise(real_avg_stars = mean(real_stars),reviews = n()) 
+```
+
+Notice that the difference getting larger, and the review count seems to be more balanced.
+
+## Previous Elite density vs. current ratings
+### Do not control Network Size
+```{r}
+# prepare 1 year ratings vs 1 year network statistics
+one_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 365) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+two_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+three_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1095) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+four_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1460) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+# prepare regression
+# baseline: one year vs one year, linear model
+lm_one_vs_one <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  lm(formula = real_stars ~ elite_density + price_level + noise_level + parking)
+
+# Censored regression
+library(censReg)
+cens_one_vs_one <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_two_vs_two <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1460) %>%
+  filter(as.Date("2018-12-31") - date >= 730) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(two_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_three_vs_three <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 2190) %>%
+  filter(as.Date("2018-12-31") - date >= 1095) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(three_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_four_vs_four <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 2920) %>%
+  filter(as.Date("2018-12-31") - date >= 1460) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(four_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_density + price_level + noise_level + parking, left = 1, right = 5)
+
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+stargazer(lm_one_vs_one, cens_one_vs_one, cens_two_vs_two, cens_three_vs_three, cens_four_vs_four, type = "html", title = "Previous Elite density vs. the current ratings", style = "aer", align = TRUE, column.labels = c("1v1", "1v1", "2v2", "3v3", "4v4"))
+```
+
+```{r}
+stargazer(lm_one_vs_one, cens_one_vs_one, cens_two_vs_two, cens_three_vs_three, cens_four_vs_four, type = "latex", title = "Previous Elite density vs. the current ratings", style = "aer", align = TRUE, column.labels = c("1v1", "1v1", "2v2", "3v3", "4v4"))
+```
+
+### V2: use Elite Count + Network Size
+```{r}
+# prepare 1 year ratings vs 1 year network statistics
+one_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 365) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+two_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+three_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1095) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+four_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1460) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+# prepare regression
+# baseline: one year vs one year, linear model
+lm_one_vs_one_v2 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  # mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  lm(formula = real_stars ~ elite_count + network_size + price_level + noise_level + parking)
+
+# Censored regression
+library(censReg)
+cens_one_vs_one_v2 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  # mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_count + network_size + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_two_vs_two_v2 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1460) %>%
+  filter(as.Date("2018-12-31") - date >= 730) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  # mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(two_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_count + network_size +  price_level + noise_level + parking, left = 1, right = 5)
+
+cens_three_vs_three_v2 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 2190) %>%
+  filter(as.Date("2018-12-31") - date >= 1095) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  # mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(three_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_count + network_size + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_four_vs_four_v2 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 2920) %>%
+  filter(as.Date("2018-12-31") - date >= 1460) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  # mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(four_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_count + network_size + price_level + noise_level + parking, left = 1, right = 5)
+
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+stargazer(lm_one_vs_one_v2, cens_one_vs_one_v2, cens_two_vs_two_v2, cens_three_vs_three_v2, cens_four_vs_four_v2, type = "latex", title = "Previous Elite count vs. the current ratings", style = "aer", align = TRUE, column.labels = c("1v1", "1v1", "2v2", "3v3", "4v4"))
+```
+
+```{r}
+stargazer(lm_one_vs_one_v2, cens_one_vs_one_v2, cens_two_vs_two_v2, cens_three_vs_three_v2, cens_four_vs_four_v2, type = "latex", title = "Previous Elite count vs. the current ratings", style = "aer", align = TRUE, column.labels = c("1v1", "1v1", "2v2", "3v3", "4v4"))
+```
+
+```{r}
+# Elite count distribution
+explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  # mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  select(elite_count) %>% 
+  skimr::skim()
+```
+
+
+
+
+
+### V3: Elite Density + Network Size 
+```{r}
+# prepare 1 year ratings vs 1 year network statistics
+one_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 365) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+two_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+three_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1095) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+four_year_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1460) %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, real_stars)
+
+# prepare regression
+# baseline: one year vs one year, linear model
+lm_one_vs_one_v3 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  lm(formula = real_stars ~ elite_density + network_size + price_level + noise_level + parking)
+
+# Censored regression
+library(censReg)
+cens_one_vs_one_v3 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_density + network_size + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_two_vs_two_v3 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1460) %>%
+  filter(as.Date("2018-12-31") - date >= 730) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(two_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_density + network_size +  price_level + noise_level + parking, left = 1, right = 5)
+
+cens_three_vs_three_v3 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 2190) %>%
+  filter(as.Date("2018-12-31") - date >= 1095) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(three_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_density + network_size + price_level + noise_level + parking, left = 1, right = 5)
+
+cens_four_vs_four_v3 <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 2920) %>%
+  filter(as.Date("2018-12-31") - date >= 1460) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(four_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  censReg::censReg(formula = real_stars ~ elite_density + network_size + price_level + noise_level + parking, left = 1, right = 5)
+
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+stargazer(lm_one_vs_one_v3, cens_one_vs_one_v3, cens_two_vs_two_v3, cens_three_vs_three_v3, cens_four_vs_four_v3, type = "html", title = "Previous Elite density vs. the current ratings", style = "aer", align = TRUE, column.labels = c("1v1", "1v1", "2v2", "3v3", "4v4"))
+```
+
+```{r}
+stargazer(lm_one_vs_one_v3, cens_one_vs_one_v3, cens_two_vs_two_v3, cens_three_vs_three_v3, cens_four_vs_four_v3, type = "latex", title = "Previous Elite density vs. the current ratings", style = "aer", align = TRUE, column.labels = c("1v1", "1v1", "2v2", "3v3", "4v4"))
+```
+
+## Suggestion
+
+1.  Add more control variables of restaurants, i.e. postcode, waiter service.
+2.  Conciser the heterogeneity of the restaurants. Maybe the natural type of the restaurants.
+3.  Control the development status of the restaurant is also essential.
+4.  Mind the confounding variables and OVB.
+5.  Find IV, but notice the external validity.
+6.  Consider quantile effect?
+
+## Developement status of restaurants
+
+```{r}
+# Evolution of restaurants
+
+# Control the variance in reputation proxy: real_stars in the 
+explore_bru %>%
+  group_by(business_id) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date > 183) %>%
+  # select(business_id, review_id, user_id, date) %>%
+  # head(10)
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>% 
+  distinct(business_id, .keep_all = TRUE)
+```
+
+## Heterogeneity of restaurants
+
+```{r}
+explore_b
+```
+
+## Volatility of ratings
+
+```{r}
+# observe the business ratings variance by years
+
+explore_bru %>%
+  ungroup() %>%
+  select(business_id, date, stars0) %>%
+  mutate(year = str_extract(date, pattern = "\\d{4}")) %>%
+  group_by(business_id, year) %>%
+  summarise(count = n(), sd= sd(stars0)) %>%
+  ungroup() %>%
+  skim(sd)
+  # group_by(business_id) %>%
+  # summarise(count = n()) %>%
+  # ungroup() %>%
+  # skim(count)
+```
+
+```{r}
+# code the before/after and calculate variance
+
+explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  mutate(half_year = if_else(as.Date("2018-12-31") - date < 183, 1, 0)) %>%
+  group_by(business_id, half_year) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = half_year, names_prefix = "half_year", values_from = sd) %>%
+  mutate(delta_sd = half_year1 - half_year0) %>%
+  filter(!is.na(delta_sd)) %>%
+  # head(10)
+  inner_join(y = half_year, by = "business_id") %>%
+  # colnames()
+  filter(elite_density != 0) %>% 
+  mutate(log_ed = log(elite_density)) %>%  
+  lm(formula = delta_sd ~ log_ed + price_level + noise_level + parking) %>% 
+  summary()
+  
+```
+
+```{r}
+# latest volatility vs. previous Elite density
+
+explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 183) %>% 
+  group_by(business_id) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  # head(10)
+  inner_join(half_year, by = "business_id") %>% 
+  filter(elite_density != 0) %>% 
+  mutate(log_ed = log(elite_density)) %>%  
+  # filter(row_number() == 1101) %>% view
+  # rio::export("half_year_sd.csv")
+  lm(formula = sd ~ log_ed + real_stars + price_level + noise_level + good_for_kids + parking + outdoor_seat + credit_card + delivery + alcohol) %>% 
+  summary()
+```
+
+## EBA
+
+```{r}
+library(ExtremeBounds)
+
+half_year_sd <-
+  explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 183) %>%
+  group_by(business_id) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  # head(10)
+  inner_join(half_year, by = "business_id") %>%
+  filter(elite_density != 0) %>%
+  mutate(log_ed = log(elite_density))
+
+naive.eba2 <-
+  eba(
+    data = half_year_sd,
+    y = "sd",
+    free = "log_ed",
+    doubtful = c(
+      "good_for_kids", "outdoor_seat", "credit_card", "delivery", "alcohol",
+      "good_for_group", "wifi", "take_out", "real_stars", "noise_level",
+      "parking", "price_level"
+    ),
+    focus = c("real_stars", "noise_level", "parking", "price_level")
+  )
+
+hist(naive.eba2)
+```
+
+```{r}
+one_year_sd <-
+  explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 365) %>%
+  group_by(business_id) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  # head(10)
+  inner_join(one_year, by = "business_id") %>%
+  filter(elite_density != 0) %>%
+  mutate(log_ed = log(elite_density))
+
+naive.eba3 <-
+  eba(
+    data = half_year_sd,
+    y = "sd",
+    free = "log_ed",
+    doubtful = c(
+      "good_for_kids", "outdoor_seat", "credit_card", "delivery", "alcohol",
+      "good_for_group", "wifi", "take_out", "noise_level", "parking",
+      "price_level"
+    ),
+    focus = c("noise_level", "parking", "price_level")
+  )
+
+hist(naive.eba3)
+```
+
+```{r}
+# Final result 
+lm_half_year_sd <-
+  explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 183) %>%
+  group_by(business_id) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  # head(10)
+  inner_join(half_year, by = "business_id") %>%
+  filter(elite_density != 0) %>%
+  mutate(log_ed = log(elite_density)) %>%
+  # filter(row_number() == 1101) %>% view
+  # rio::export("half_year_sd.csv")
+  lm(formula = sd ~ log_ed + real_stars + price_level + noise_level + good_for_kids + parking + outdoor_seat + credit_card + delivery + alcohol)
+
+lm_one_year_sd <-
+  explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 365) %>%
+  group_by(business_id) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  # head(10)
+  inner_join(one_year, by = "business_id") %>%
+  filter(elite_density != 0) %>%
+  mutate(log_ed = log(elite_density)) %>%
+  # filter(row_number() == 1101) %>% view
+  # rio::export("half_year_sd.csv")
+  lm(formula = sd ~ log_ed + real_stars + price_level + noise_level + good_for_kids + parking + outdoor_seat + credit_card + delivery + alcohol)
+
+lm_two_year_sd <-
+  explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  group_by(business_id) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  # head(10)
+  inner_join(two_year, by = "business_id") %>%
+  filter(elite_density != 0) %>%
+  mutate(log_ed = log(elite_density)) %>%
+  # filter(row_number() == 1101) %>% view
+  # rio::export("half_year_sd.csv")
+  lm(formula = sd ~ log_ed + real_stars + price_level + noise_level + good_for_kids + parking + outdoor_seat + credit_card + delivery + alcohol)
+
+lm_three_year_sd <-
+  explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1095) %>%
+  group_by(business_id) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  # head(10)
+  inner_join(three_year, by = "business_id") %>%
+  filter(elite_density != 0) %>%
+  mutate(log_ed = log(elite_density)) %>%
+  # filter(row_number() == 1101) %>% view
+  # rio::export("half_year_sd.csv")
+  lm(formula = sd ~ log_ed + real_stars + price_level + noise_level + good_for_kids + parking + outdoor_seat + credit_card + delivery + alcohol)
+
+lm_four_year_sd <-
+  explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1460) %>%
+  group_by(business_id) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  # head(10)
+  inner_join(four_year, by = "business_id") %>%
+  filter(elite_density != 0) %>%
+  mutate(log_ed = log(elite_density)) %>%
+  # filter(row_number() == 1101) %>% view
+  # rio::export("half_year_sd.csv")
+  lm(formula = sd ~ log_ed + real_stars + price_level + noise_level + good_for_kids + parking + outdoor_seat + credit_card + delivery + alcohol)
+
+lm_five_year_sd <-
+  explore_bru %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1825) %>%
+  group_by(business_id) %>%
+  summarise(sd = sd(stars0)) %>%
+  ungroup() %>%
+  # head(10)
+  inner_join(five_year, by = "business_id") %>%
+  filter(elite_density != 0) %>%
+  mutate(log_ed = log(elite_density)) %>%
+  # filter(row_number() == 1101) %>% view
+  # rio::export("half_year_sd.csv")
+  lm(formula = sd ~ log_ed + real_stars + price_level + noise_level + good_for_kids + parking + outdoor_seat + credit_card + delivery + alcohol)
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+stargazer(lm_half_year_sd, lm_one_year_sd, lm_two_year_sd, lm_three_year_sd, type = "html", title = "Previous Elite density vs. the rating volatility", style = "aer", align = TRUE, column.labels = c("half-year", "1 year", "2 year", "3 year"),keep = c("log_ed","real_stars"))
+```
+
+## Quantile effect
+
+```{r}
+library(quantreg)
+qrg_half <- 
+  half_year %>% 
+  quantreg::rq(formula = real_stars ~ elite_density + price_level + noise_level + parking, 
+    tau = 1:9/10, data = .)
+
+qrg_one <- 
+  one_year %>% 
+  quantreg::rq(formula = real_stars ~ elite_density + price_level + noise_level + parking, 
+    tau = 1:9/10, data = .)
+```
+
+```{r}
+summary(qrg_half) %>% plot()
+```
+
+```{r}
+summary(qrg_one) %>% plot()
+```
+
+```{r}
+# use the new 1 vs 1 setting
+library(quantreg)
+qrg_one_vs_one <- 
+explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  quantreg::rq(formula = real_stars ~ elite_density + price_level + noise_level + parking, 
+    tau = 1:9/10, data = .)
+```
+
+```{r}
+summary(qrg_one_vs_one, se = "boot") %>% plot()
+```
+
+# Elite and reviews of resaurants
+## Previous Elite density vs. current review count
+```{r}
+# prepare 1 year ratings vs 1 year network statistics
+one_year_review <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 365) %>%
+  group_by(business_id) %>%
+  mutate(reviews = n_distinct(review_id)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, reviews)
+
+two_year_review <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  group_by(business_id) %>%
+  mutate(reviews = n_distinct(review_id)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, reviews)
+
+three_year_review <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1095) %>%
+  group_by(business_id) %>%
+  mutate(reviews = n_distinct(review_id)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, reviews)
+
+four_year_review <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1460) %>%
+  group_by(business_id) %>%
+  mutate(reviews = n_distinct(review_id)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, reviews)
+
+# prepare regression
+# baseline: one year vs one year, linear model
+lm_one_vs_one_review <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_review, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  lm(formula = reviews ~ elite_density + price_level + noise_level + parking)
+
+lm_two_vs_two_review <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 1460) %>%
+  filter(as.Date("2018-12-31") - date >= 730) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(two_year_review, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  lm(formula = reviews ~ elite_density + price_level + noise_level + parking)
+
+
+lm_three_vs_three_review <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 2190) %>%
+  filter(as.Date("2018-12-31") - date >= 1095) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(three_year_review, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  lm(formula = reviews ~ elite_density + price_level + noise_level + parking)
+
+
+lm_four_vs_four_review <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 2920) %>%
+  filter(as.Date("2018-12-31") - date >= 1460) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(four_year_review, by = "business_id") %>%
+  mutate(price_level = as.character(price_level)) %>%
+  lm(formula = reviews ~ elite_density + price_level + noise_level + parking)
+
+
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+stargazer(lm_one_vs_one_review, lm_two_vs_two_review, lm_three_vs_three_review, lm_four_vs_four_review, type = "html", title = "Previous Elite density vs. the current review count", style = "aer", align = TRUE, column.labels = c("1v1","2v2", "3v3", "4v4"))
+```
+
+```{r}
+stargazer(lm_one_vs_one_review, lm_two_vs_two_review, lm_three_vs_three_review, lm_four_vs_four_review, type = "latex", title = "Previous Elite density vs. the current review count", style = "aer", align = TRUE, column.labels = c("1v1","2v2", "3v3", "4v4"))
+```
+## IV approach
+```{r}
+one_year_review_rating <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 365) %>%
+  group_by(business_id) %>%
+  mutate(reviews = n_distinct(review_id)) %>%
+  mutate(real_stars = mean(stars0, na.rm = TRUE)) %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  select(business_id, reviews, real_stars)
+iv_reviews_one_year <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_review_rating, by = "business_id") %>%
+  mutate(price_level = as.character(price_level))
+
+library(ivreg)
+iv_r <- ivreg(reviews ~ elite_density + price_level + noise_level + parking | price_level + noise_level + parking + stars0, data = iv_reviews_one_year)
+library(sandwich)
+summary(iv_r, vcov = sandwich, diagnostics = TRUE)
+
+stargazer(iv_r, type = "text", style = "aer", align = TRUE)
+```
+## Double Machine Learning approach 
+```{r}
+# semi-paremertics estimation: double machine learning
+# Partially linear IV regression model (PLIV)
+# install.packages("DoubleML")
+library(DoubleML)
+library(mlr3)
+library(mlr3learners)
+library(data.table)
+
+test_data <-
+  explore_bru %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  filter(as.Date("2018-12-31") - date < 730) %>%
+  filter(as.Date("2018-12-31") - date >= 365) %>%
+  group_by(business_id) %>%
+  mutate(elite_count = sum(effective_elite), network_size = n_distinct(user_id)) %>%
+  mutate(elite_density = elite_count / network_size) %>%
+  ungroup() %>%
+  distinct(business_id, .keep_all = TRUE) %>%
+  inner_join(one_year_review, by = "business_id") %>%
+  mutate(price_level = as.character(price_level))
+
+test_data <-
+  test_data %>%
+  filter(across(.cols = c(price_level, noise_level, parking), ~ !is.na(.x)))
+
+learner <- lrn("regr.ranger", num.trees = 100, mtry = 3, min.node.size = 2, max.depth = 5)
+ml_g <- learner$clone()
+ml_m <- learner$clone()
+ml_r <- learner$clone()
+set.seed(2222)
+data <- make_pliv_CHS2015(alpha = 0.5, n_obs = 500, dim_x = 20, dim_z = 1, return_type = "data.table")
+obj_dml_data <- double_ml_data_from_data_frame(
+  df = test_data,
+  x_cols = c("price_level", "noise_level", "parking"),
+  y_col = "reviews",
+  d_cols = "elite_density",
+  z_cols = "stars0"
+)
+
+dml_pliv_obj <- DoubleMLPLIV$new(obj_dml_data, ml_g, ml_m, ml_r)
+dml_pliv_obj$fit()
+print(dml_pliv_obj)
+```
+
+
+# Elite in converge opinion
+
+In this section, we'd like to further explore whether the Elite does help converge the opinion of the reviewers.
+
+We can compare the volatility (variance) of the restaurant ratings before/after the join of the Elite.
+
+(TBC)
+
+# Mechanism
+
+## Elite's effect on shaping rating behavior of individuals
+
+```{r}
+# import data
+library(readr)
+u_nf_ef_full <- read_csv("~/yelp_project/Data/u_nf_ef_full.csv", 
+    col_types = cols(yelping_since = col_character(), 
+        elite = col_character()))
+```
+
+```{r}
+# skim data 
+library(skimr)
+u_nf_ef_full %>% skim()
+```
+
+```{r}
+# observe useful variables
+u_nf_ef_full %>% colnames()
+```
+
+Notice that some of the variable are indicators of the quality to the users' reviews. E.g., useful, funny, cool, and many kinds of compliments.
+
+```{r}
+# deal with time variable
+u_nf_ef_full <-
+  u_nf_ef_full %>%
+  mutate(yelping_since = (as.Date("2018-12-31") - as.Date(yelping_since)) %>% as.numeric())
+```
+
+```{r}
+# distribution of users' review count
+u_nf_ef_full %>% 
+  select(review_count) %>% 
+  mutate(log_review_count = log(review_count)) %>% 
+  select(log_review_count) %>%
+  skim()
+```
+
+```{r}
+# regression
+# baseline
+u_nf_ef_full %>% 
+  lm(review_count ~ yelping_since + average_stars + u.avg_rof_elite + u.avg_rof_normal,data = .)  %>% summary()
+```
+
+Notice that the error term of the baseline model is far from zero-mean.
+
+```{r}
+# check the distribution of the variables 
+u_nf_ef_full %>% 
+  select(review_count,u.f_elite,u.f_normal,u.avg_rof_elite,u.avg_rof_normal) %>% 
+  skim()
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+# friends distribution, Elite vs. normal
+u_nf_ef_full %>% 
+  mutate(has_been_elite = if_else(is.na(elite),0,1)) %>% 
+  group_by(has_been_elite) %>% 
+  summarise(Elite_friends = round(mean(u.f_elite),1), Normal_friends = round(mean(u.f_normal),1)) %>% 
+  kable(type = "html") %>% 
+  kableExtra::kable_styling(full_width = F)
+```
+
+```{r}
+baseline <-
+  u_nf_ef_full %>%
+  lm(log(review_count) ~ yelping_since + average_stars + log(u.avg_rof_elite) + log(u.avg_rof_normal) + log(u.f_elite) + log(u.f_normal), data = .)
+
+baseline_cens <-
+  u_nf_ef_full %>%
+  censReg::censReg(log(review_count) ~ yelping_since + average_stars + log(u.avg_rof_elite) + log(u.avg_rof_normal) + log(u.f_elite) + log(u.f_normal), left = 0,data = .)
+
+par(mfrow=c(2,2))
+plot(baseline)
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+stargazer(baseline, type = "latex", title = "Network reviews vs. own reviews", style = "aer", align = TRUE, column.labels = c("baseline"))
+```
+
+## Quantile effect
+
+```{r}
+library(quantreg)
+
+u_nf_ef_full %>%
+  quantreg::rq(log(review_count) ~ yelping_since + average_stars + log(u.avg_rof_elite) + log(u.avg_rof_normal) + log(u.f_elite) + log(u.f_normal),data = .,tau = 1:9/10) %>% summary() %>% plot
+```
+
+```{r}
+# consider own identity and interaction effect
+library(readr)
+u_nf_ef_qq <- read_csv("~/yelp_project/Data/u_nf_ef_qq.csv",
+  col_types = cols(
+    yelping_since = col_character(),
+    elite = col_character()
+  )
+)
+
+# deal with time variable
+u_nf_ef_qq <-
+  u_nf_ef_qq %>%
+  mutate(yelping_since = (as.Date("2018-12-31") - as.Date(yelping_since)) %>% as.numeric())
+
+# Overall Elite identity
+u_nf_ef_qq <-
+  u_nf_ef_qq %>%
+  mutate(been_elite = if_else(is.na(elite), 0, 1))
+# select(elite,been_elite) %>% head(10) %>% view()
+
+library(quantreg)
+
+u_nf_ef_qq %>%
+  quantreg::rq(log(review_count) ~ yelping_since + average_stars + been_elite + log(u.avg_rof_elite) + log(u.avg_rof_normal) + log(u.f_elite) + log(u.f_normal), data = ., tau = 1:9 / 10) %>%
+  summary() %>%
+  plot()
+```
+
+```{r}
+# consider quality-qantiy index
+```
+
+## IV
+
+```{r}
+library(ivreg)
+# Outcome: normal user's behavior may effect by the elite users' behavior
+# behavior could be rating, review count, review sentiment...
+
+# rating 
+iv_rating <-
+  ivreg(average_stars ~ yelping_since + been_elite + u.f_elite + u.f_normal | yelping_since + been_elite + u.avg_rof_elite + u.avg_rof_normal, data = u_nf_ef_qq)
+
+summary(iv_rating, vcov = sandwich, diagnostic = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE, results='asis'}
+stargazer::stargazer(iv_rating,type = "html", title = "Own rating vs. friend composition", style = "aer", align = TRUE)
+```
+
+# HLM
+
+```{r}
+library(lmerTest)
+# null model 
+hlm_null <-
+  lmer(formula = stars0 ~ (1 | business_id), data = explore_bru) 
+
+hlm_null %>% summary()
+```
+
+```{r}
+performance::icc(hlm_null)
+```
+
+This shows that 29% of the rating variance is explained by restaurant differences.
+
+So let consider the rating formation process that 1. For each user, the user giving the rating based on his/her own characteristics and his/her friends' characteristics. Also, it will related to the mean performance giving the characteristics of the restaurants. 2. Base on the restaurant's performance, user add/deduct ratings to his/her level of surprises. (TBC)
